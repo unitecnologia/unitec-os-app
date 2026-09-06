@@ -1,0 +1,63 @@
+workflows:
+  unitec-os-android:
+    name: Unitec OS - Android APK
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      # Alinhar com o Flutter usado no desenvolvimento (Dart 3.12 / AGP do android/).
+      flutter: 3.44.7
+      java: 17
+      groups:
+        # Opcional: cadastre no Codemagic o grupo keystore_credentials
+        # CM_KEYSTORE (base64), CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS, CM_KEY_PASSWORD
+        - keystore_credentials
+    triggering:
+      events:
+        - push
+    scripts:
+      - name: Instalar dependencias
+        script: flutter pub get
+      - name: Configurar assinatura (se houver keystore)
+        script: |
+          set -e
+          if [ -n "$CM_KEYSTORE" ]; then
+            echo "Assinatura: keystore do grupo Codemagic."
+            STORE_FILE="$CM_BUILD_DIR/unitec-os-release.keystore"
+            echo "$CM_KEYSTORE" | base64 --decode > "$STORE_FILE"
+            {
+              printf 'storePassword=%s\n' "$CM_KEYSTORE_PASSWORD"
+              printf 'keyPassword=%s\n' "${CM_KEY_PASSWORD:-$CM_KEYSTORE_PASSWORD}"
+              printf 'keyAlias=%s\n' "$CM_KEY_ALIAS"
+              printf 'storeFile=%s\n' "$STORE_FILE"
+            } > android/key.properties
+            # Liga signingConfig de release se o projeto tiver bloco preparado.
+            if ! grep -q 'key.properties' android/app/build.gradle.kts; then
+              echo "AVISO: key.properties gerado; configure signingConfig no build.gradle.kts para usar a keystore."
+            fi
+          else
+            echo "Sem keystore Codemagic — APK assinado com a config atual do projeto (debug)."
+          fi
+      - name: Build APK release (versionCode incremental)
+        script: |
+          set -e
+          # versionCode precisa ser maior que o APK já instalado.
+          PUBSPEC_CODE=$(grep '^version:' pubspec.yaml | sed 's/.*+//')
+          BUILD_NUM=${BUILD_NUMBER:-1}
+          if [ "$BUILD_NUM" -lt "$PUBSPEC_CODE" ]; then
+            BUILD_NUM=$PUBSPEC_CODE
+          fi
+          # Mantém o versionName do pubspec (ex.: 1.0.0) e sobe só o +N.
+          VERSION_NAME=$(grep '^version:' pubspec.yaml | sed 's/version: //;s/+.*//')
+          echo "versionName=$VERSION_NAME versionCode=$BUILD_NUM (pubspec+$PUBSPEC_CODE, build #$BUILD_NUMBER)"
+          flutter build apk --release \
+            --build-name="$VERSION_NAME" \
+            --build-number="$BUILD_NUM"
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+    publishing:
+      email:
+        recipients:
+          - TROQUE_PELO_SEU_EMAIL@exemplo.com
+        notify:
+          success: true
+          failure: true

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:unitec_os_app/config/api_config.dart';
+import 'package:unitec_os_app/config/app_version.dart';
 import 'package:unitec_os_app/screens/minhas_os_screen.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/services/auth_service.dart';
@@ -267,6 +268,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 'Conectando em: ${ApiConfig.erpBaseUrl}',
                 style: const TextStyle(fontSize: 12, color: AppTheme.muted),
               ),
+              const SizedBox(height: 6),
+              Text(
+                'Versão ${AppVersion.label}',
+                style: const TextStyle(fontSize: 12, color: AppTheme.muted),
+              ),
               const SizedBox(height: 14),
               OutlinedButton.icon(
                 onPressed: _carregando
@@ -319,6 +325,16 @@ class _LoginScreenState extends State<LoginScreen> {
                           color: AppTheme.primaryBlueDark,
                           fontSize: 28,
                           fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Versão ${AppVersion.label}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: AppTheme.muted,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                       const SizedBox(height: 22),

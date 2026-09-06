@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:unitec_os_app/config/app_version.dart';
 import 'package:unitec_os_app/models/ordem_servico.dart';
 import 'package:unitec_os_app/screens/detalhe_os_screen.dart';
 import 'package:unitec_os_app/screens/login_screen.dart';
@@ -130,7 +131,20 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Olá, ${AppSession.usuario}'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Olá, ${AppSession.usuario}'),
+            Text(
+              'Unitec OS • v${AppVersion.label}',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: Colors.white70,
+              ),
+            ),
+          ],
+        ),
         actions: [
           if (pending > 0)
             Padding(

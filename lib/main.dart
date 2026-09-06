@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:unitec_os_app/config/api_config.dart';
+import 'package:unitec_os_app/config/app_version.dart';
 import 'package:unitec_os_app/screens/detalhe_os_screen.dart';
 import 'package:unitec_os_app/screens/login_screen.dart';
 import 'package:unitec_os_app/screens/minhas_os_screen.dart';
@@ -13,6 +14,7 @@ Future<void> main() async {
   await DeviceIdentity.ensureReady();
   await ApiConfig.loadSavedUrl();
   await AppSession.load();
+  await AppVersion.load();
   await SyncService.instance.start();
   runApp(const UnitecOsApp());
 }

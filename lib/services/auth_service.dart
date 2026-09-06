@@ -1,4 +1,5 @@
 import 'package:unitec_os_app/config/api_config.dart';
+import 'package:unitec_os_app/config/app_version.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/session/app_session.dart';
 
@@ -78,7 +79,7 @@ class AuthService {
         'device_uuid': DeviceIdentity.uuid,
         'device_name': DeviceIdentity.deviceName,
         'platform': DeviceIdentity.platform,
-        'app_version': '1.0.0',
+        'app_version': AppVersion.full,
       },
       auth: false,
       device: false,
@@ -151,7 +152,7 @@ class AuthService {
         'device_uuid': DeviceIdentity.uuid,
         'device_name': DeviceIdentity.deviceName,
         'platform': DeviceIdentity.platform,
-        'app_version': '1.0.0',
+        'app_version': AppVersion.full,
       },
       auth: false,
     );
