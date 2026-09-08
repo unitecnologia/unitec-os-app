@@ -202,6 +202,9 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
             ? 'Salvo localmente (aguardando sync).'
             : 'OS salva.');
       }
+      // Volta para a tela inicial (Minhas OS) após salvar ou finalizar.
+      if (!mounted) return;
+      Navigator.of(context).pop();
     } on ApiException catch (e) {
       _toast(e.message);
       if (mounted) setState(() => _salvando = false);
