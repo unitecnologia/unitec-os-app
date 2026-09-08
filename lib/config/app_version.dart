@@ -5,7 +5,7 @@ class AppVersion {
   AppVersion._();
 
   static String name = '1.0.0';
-  static String build = '1';
+  static String build = '2';
 
   /// Ex.: `1.0.0 (1)`
   static String get label => '$name ($build)';
