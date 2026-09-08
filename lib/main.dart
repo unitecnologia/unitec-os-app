@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:unitec_os_app/config/api_config.dart';
 import 'package:unitec_os_app/config/app_version.dart';
 import 'package:unitec_os_app/screens/detalhe_os_screen.dart';
@@ -11,6 +12,20 @@ import 'package:unitec_os_app/theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Oculta a barra preta de navegação do Android em todas as telas.
+  await SystemChrome.setEnabledSystemUIMode(
+    SystemUiMode.manual,
+    overlays: [SystemUiOverlay.top],
+  );
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+    ),
+  );
+
   await DeviceIdentity.ensureReady();
   await ApiConfig.loadSavedUrl();
   await AppSession.load();

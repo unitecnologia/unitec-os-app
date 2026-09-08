@@ -4,6 +4,10 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>O Unitec OS precisa da câmera para fotografar o atendimento da ordem de serviço.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>O Unitec OS precisa acessar suas fotos para anexá-las à ordem de serviço.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

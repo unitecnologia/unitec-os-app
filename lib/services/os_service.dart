@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:sqflite/sqflite.dart';
 import 'package:unitec_os_app/data/local/app_database.dart';
@@ -183,6 +184,7 @@ class OsService {
   Future<({OrdemServico os, bool clienteCriado, bool offline})> criarOs({
     int? clienteId,
     required String cliente,
+    String nomeFantasia = '',
     String telefone = '',
     String email = '',
     String cpfCnpj = '',
@@ -213,6 +215,7 @@ class OsService {
     final body = <String, dynamic>{
       'cliente_id': ?clienteId,
       'cliente': cliente.trim(),
+      'nome_fantasia': nomeFantasia.trim(),
       'telefone': telefone.trim(),
       'email': email.trim(),
       'cpf_cnpj': cpfCnpj.trim(),
@@ -325,6 +328,36 @@ class OsService {
     return data.map((k, v) => MapEntry('$k', v?.toString() ?? ''));
   }
 
+  Future<void> enviarFotoOs({
+    required int osId,
+    required File arquivo,
+  }) async {
+    final bytes = await arquivo.readAsBytes();
+    final nome = arquivo.uri.pathSegments.isNotEmpty
+        ? arquivo.uri.pathSegments.last
+        : 'foto.jpg';
+    await _client.postMultipart(
+      '/ordens/$osId/fotos',
+      fieldName: 'foto',
+      bytes: bytes,
+      filename: nome,
+      contentType: 'image/jpeg',
+    );
+  }
+
+  Future<void> enviarAssinaturaOs({
+    required int osId,
+    required List<int> pngBytes,
+  }) async {
+    await _client.postMultipart(
+      '/ordens/$osId/assinatura',
+      fieldName: 'assinatura',
+      bytes: pngBytes,
+      filename: 'assinatura.png',
+      contentType: 'image/png',
+    );
+  }
+
   Future<void> _replaceCreatePayload(
     OrdemServico os,
     Map<String, dynamic> body,
@@ -387,13 +420,18 @@ class OsService {
       );
     }
 
+    if (iniciar && next.tecnico.trim().isEmpty) {
+      next = next.copyWith(tecnico: AppSession.usuario);
+    }
+
     if (next.id != null) {
       try {
         final json = await _client.putJson(
           '/ordens/${next.id}',
           body: {
             'status': next.status,
-            if (next.horaInicio != null) 'hora_inicio': next.horaInicio,
+            // No iniciar, o servidor grava/preserva hora_inicio (não sobrescreve).
+            if (!iniciar && next.horaInicio != null) 'hora_inicio': next.horaInicio,
             if (servicoRealizado != null) 'servico_realizado': next.servicoRealizado,
             if (observacoes != null) 'observacoes': next.observacao,
             if (pecas != null) 'pecas': next.pecas.map((e) => e.toJson()).toList(),
@@ -409,8 +447,8 @@ class OsService {
           await _db.upsertFromServer(serverOs);
           return (await _db.getByKey('s:${serverOs.id}')) ?? serverOs;
         }
-      } on ApiException catch (e) {
-        if (e.statusCode == 401) rethrow;
+      } on ApiException {
+        rethrow;
       } catch (_) {}
     }
 

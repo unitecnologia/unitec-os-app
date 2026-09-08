@@ -1,11 +1,17 @@
 ﻿import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:unitec_os_app/models/ordem_servico.dart';
 import 'package:unitec_os_app/models/peca_os.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/services/os_service.dart';
 import 'package:unitec_os_app/theme/app_theme.dart';
+import 'package:unitec_os_app/widgets/assinatura_pad_dialog.dart';
 
 class DetalheOsScreen extends StatefulWidget {
   const DetalheOsScreen({super.key, required this.osKey});
@@ -32,8 +38,12 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
   String? _inicioAtendimento;
   final List<PecaOs> _pecas = [];
   final List<PecaOs> _servicos = [];
-  int _fotosMock = 0;
-  bool _assinaturaColetada = false;
+  final List<File> _fotos = [];
+  final _imagePicker = ImagePicker();
+  final Set<String> _fotosSincronizadas = {};
+  Uint8List? _assinaturaPng;
+  bool _assinaturaSincronizada = false;
+  bool _enviandoMidia = false;
 
   @override
   void initState() {
@@ -63,6 +73,9 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         });
         return;
       }
+      final assinatura = await _lerAssinaturaLocal(widget.osKey);
+      final fotos = await _listarFotosLocal(widget.osKey);
+      if (!mounted) return;
       setState(() {
         _os = os;
         _status = os.status;
@@ -81,8 +94,14 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         _servicos
           ..clear()
           ..addAll(os.servicos);
+        _fotos
+          ..clear()
+          ..addAll(fotos);
+        _assinaturaPng = assinatura;
         _carregando = false;
       });
+      // ignore: discarded_futures
+      _sincronizarMidiasPendentes();
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -142,31 +161,92 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     if (_os == null || _salvando) return;
     setState(() => _salvando = true);
     try {
-      final updated = await _osService.atualizarAtendimento(
-        os: _os!,
-        servicoRealizado: _servicoRealizado.text.trim(),
-        observacoes: _observacoes.text.trim(),
-        pecas: List<PecaOs>.from(_pecas),
-        servicos: List<PecaOs>.from(_servicos),
-        finalizar: finalizar,
-      );
+      final OrdemServico updated;
+      if (finalizar) {
+        updated = await _osService.atualizarAtendimento(
+          os: _os!,
+          observacoes: _observacoes.text.trim(),
+          pecas: List<PecaOs>.from(_pecas),
+          servicos: List<PecaOs>.from(_servicos),
+          finalizar: true,
+        );
+      } else {
+        updated = await _osService.atualizarAtendimento(
+          os: _os!,
+          observacoes: _observacoes.text.trim(),
+          servicos: List<PecaOs>.from(_servicos),
+          pecas: List<PecaOs>.from(_pecas),
+        );
+      }
       if (!mounted) return;
-      final msg = finalizar
-          ? (updated.pendingSync
-              ? 'OS finalizada (aguardando sync).'
-              : 'OS finalizada.')
-          : (updated.pendingSync
-              ? 'Salvo localmente (aguardando sync).'
-              : 'OS salva.');
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-      Navigator.of(context).pop(true);
+      setState(() {
+        _os = updated;
+        _status = updated.status;
+        _inicioAtendimento = updated.horaInicio;
+        _servicoRealizado.text = updated.servicoRealizado;
+        _observacoes.text = updated.observacao;
+        _servicos
+          ..clear()
+          ..addAll(updated.servicos);
+        _pecas
+          ..clear()
+          ..addAll(updated.pecas);
+        _salvando = false;
+      });
+      if (finalizar) {
+        _toast(updated.pendingSync
+            ? 'OS finalizada (aguardando sync).'
+            : 'OS finalizada.');
+      } else {
+        _toast(updated.pendingSync
+            ? 'Salvo localmente (aguardando sync).'
+            : 'OS salva.');
+      }
     } on ApiException catch (e) {
       _toast(e.message);
       if (mounted) setState(() => _salvando = false);
     } catch (_) {
-      _toast('Falha ao salvar.');
+      _toast(finalizar ? 'Falha ao finalizar a OS.' : 'Falha ao salvar.');
       if (mounted) setState(() => _salvando = false);
     }
+  }
+
+  Future<void> _finalizarOs() async {
+    if (_os == null || _salvando) return;
+
+    final iniciada = _status == 'Em andamento' ||
+        _status == 'Finalizada' ||
+        (_inicioAtendimento != null && _inicioAtendimento!.trim().isNotEmpty);
+    if (!iniciada || _status == 'Pendente') {
+      _toast('Inicie o atendimento antes de finalizar a OS.');
+      return;
+    }
+
+    if (_servicos.isEmpty) {
+      _toast('Informe pelo menos um serviço realizado antes de finalizar.');
+      return;
+    }
+
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Finalizar OS'),
+        content: const Text('Deseja finalizar esta OS?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Finalizar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmar != true || !mounted) return;
+
+    await _salvar(finalizar: true);
   }
 
   Future<void> _adicionarPeca() async {
@@ -177,7 +257,14 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         tipo: 'produto',
       ),
     );
-    if (selecionado == null) return;
+    if (selecionado == null || !mounted) return;
+
+    final qtd = await showDialog<double>(
+      context: context,
+      builder: (ctx) => const _QuantidadePecaDialog(),
+    );
+    if (qtd == null || !mounted) return;
+
     setState(() {
       _pecas.add(
         PecaOs(
@@ -185,63 +272,330 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
           codigo: selecionado.codigo,
           descricao: selecionado.descricao,
           preco: selecionado.preco,
+          qtd: qtd,
         ),
       );
     });
-  }
-
-  Future<void> _adicionarServico() async {
-    final selecionado = await showDialog<ProdutoResumo>(
-      context: context,
-      builder: (ctx) => const _BuscarCatalogoDialog(
-        titulo: 'Adicionar serviço',
-        tipo: 'servico',
-      ),
-    );
-    if (selecionado == null || !mounted) return;
-
-    final preco = await showDialog<double>(
-      context: context,
-      builder: (ctx) => _ValorServicoDialog(
-        titulo: 'Valor do serviço',
-        descricao: selecionado.descricao,
-        codigo: selecionado.codigo,
-        valorInicial: selecionado.preco,
-        confirmarLabel: 'Adicionar',
-      ),
-    );
-    if (preco == null || !mounted) return;
-
-    setState(() {
-      _servicos.add(
-        PecaOs(
-          produtoId: selecionado.id,
-          codigo: selecionado.codigo,
-          descricao: selecionado.descricao,
-          preco: preco,
-        ),
-      );
-    });
-  }
-
-  Future<void> _editarValorServico(int index) async {
-    final atual = _servicos[index];
-    final preco = await showDialog<double>(
-      context: context,
-      builder: (ctx) => _ValorServicoDialog(
-        titulo: 'Alterar valor',
-        descricao: atual.descricao,
-        codigo: atual.codigo,
-        valorInicial: atual.preco,
-        confirmarLabel: 'Salvar',
-      ),
-    );
-    if (preco == null || !mounted) return;
-    setState(() => _servicos[index] = atual.copyWith(preco: preco));
   }
 
   String _fmtMoney(double v) {
     return 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+  }
+
+  String _fmtQtd(double v) {
+    if (v == v.roundToDouble()) return '${v.toInt()}';
+    return v.toStringAsFixed(2).replaceAll('.', ',');
+  }
+
+  Future<void> _adicionarServicoRealizado() async {
+    final descricao = await showDialog<String>(
+      context: context,
+      builder: (ctx) => const _DescricaoServicoDialog(),
+    );
+    if (descricao == null || !mounted) return;
+    final texto = descricao.trim();
+    if (texto.isEmpty) return;
+    setState(() {
+      _servicos.add(PecaOs(descricao: texto.toUpperCase()));
+    });
+  }
+
+  String _chaveArquivoAssinatura(String osKey) =>
+      osKey.replaceAll(RegExp(r'[^\w\-]+'), '_');
+
+  Future<File> _arquivoAssinatura(String osKey) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final pasta = Directory(p.join(dir.path, 'assinaturas'));
+    if (!await pasta.exists()) {
+      await pasta.create(recursive: true);
+    }
+    return File(p.join(pasta.path, '${_chaveArquivoAssinatura(osKey)}.png'));
+  }
+
+  Future<Uint8List?> _lerAssinaturaLocal(String osKey) async {
+    try {
+      final file = await _arquivoAssinatura(osKey);
+      if (!await file.exists()) return null;
+      return await file.readAsBytes();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _salvarAssinaturaLocal(String osKey, Uint8List bytes) async {
+    final file = await _arquivoAssinatura(osKey);
+    await file.writeAsBytes(bytes, flush: true);
+    await _marcarNaoSincronizado(file);
+  }
+
+  File _marcadorSync(File arquivo) => File('${arquivo.path}.ok');
+
+  Future<bool> _estaSincronizado(File arquivo) async {
+    try {
+      return await _marcadorSync(arquivo).exists();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _marcarSincronizado(File arquivo) async {
+    try {
+      await _marcadorSync(arquivo).writeAsString(
+        DateTime.now().toIso8601String(),
+        flush: true,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _marcarNaoSincronizado(File arquivo) async {
+    try {
+      final m = _marcadorSync(arquivo);
+      if (await m.exists()) await m.delete();
+    } catch (_) {}
+  }
+
+  Future<void> _coletarAssinatura() async {
+    final bytes = await AssinaturaPadDialog.show(context);
+    if (bytes == null || !mounted) return;
+    await _salvarAssinaturaLocal(widget.osKey, bytes);
+    if (!mounted) return;
+    setState(() {
+      _assinaturaPng = bytes;
+      _assinaturaSincronizada = false;
+    });
+    _toast('Assinatura salva.');
+    await _enviarAssinaturaSePossivel(bytes);
+  }
+
+  String _chavePastaFotos(String osKey) =>
+      osKey.replaceAll(RegExp(r'[^\w\-]+'), '_');
+
+  Future<Directory> _pastaFotos(String osKey) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final pasta =
+        Directory(p.join(dir.path, 'fotos_os', _chavePastaFotos(osKey)));
+    if (!await pasta.exists()) {
+      await pasta.create(recursive: true);
+    }
+    return pasta;
+  }
+
+  Future<List<File>> _listarFotosLocal(String osKey) async {
+    try {
+      final pasta = await _pastaFotos(osKey);
+      final arquivos = pasta
+          .listSync()
+          .whereType<File>()
+          .where((f) {
+            final ext = p.extension(f.path).toLowerCase();
+            return ext == '.jpg' ||
+                ext == '.jpeg' ||
+                ext == '.png' ||
+                ext == '.webp';
+          })
+          .toList()
+        ..sort((a, b) => a.path.compareTo(b.path));
+
+      _fotosSincronizadas.clear();
+      for (final f in arquivos) {
+        if (await _estaSincronizado(f)) {
+          _fotosSincronizadas.add(f.path);
+        }
+      }
+
+      final assinaturaFile = await _arquivoAssinatura(osKey);
+      _assinaturaSincronizada = await _estaSincronizado(assinaturaFile);
+
+      return arquivos;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _sincronizarMidiasPendentes() async {
+    final osId = _os?.id;
+    if (osId == null || _enviandoMidia) return;
+
+    for (final foto in List<File>.from(_fotos)) {
+      if (_fotosSincronizadas.contains(foto.path)) continue;
+      await _enviarFotoSePossivel(foto, silencioso: true);
+    }
+
+    if (_assinaturaPng != null && !_assinaturaSincronizada) {
+      await _enviarAssinaturaSePossivel(_assinaturaPng!, silencioso: true);
+    }
+  }
+
+  Future<void> _enviarFotoSePossivel(
+    File foto, {
+    bool silencioso = false,
+  }) async {
+    final osId = _os?.id;
+    if (osId == null) {
+      if (!silencioso) {
+        _toast('Salve a OS no ERP antes de enviar fotos.');
+      }
+      return;
+    }
+    try {
+      setState(() => _enviandoMidia = true);
+      await _osService.enviarFotoOs(osId: osId, arquivo: foto);
+      await _marcarSincronizado(foto);
+      if (!mounted) return;
+      setState(() {
+        _fotosSincronizadas.add(foto.path);
+        _enviandoMidia = false;
+      });
+      if (!silencioso) _toast('Foto enviada ao ERP.');
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _enviandoMidia = false);
+      if (!silencioso) _toast(e.message);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _enviandoMidia = false);
+      if (!silencioso) {
+        _toast('Falha ao enviar foto. Mantida localmente.');
+      }
+    }
+  }
+
+  Future<void> _enviarAssinaturaSePossivel(
+    Uint8List bytes, {
+    bool silencioso = false,
+  }) async {
+    final osId = _os?.id;
+    if (osId == null) {
+      if (!silencioso) {
+        _toast('Salve a OS no ERP antes de enviar a assinatura.');
+      }
+      return;
+    }
+    try {
+      setState(() => _enviandoMidia = true);
+      await _osService.enviarAssinaturaOs(osId: osId, pngBytes: bytes);
+      final file = await _arquivoAssinatura(widget.osKey);
+      await _marcarSincronizado(file);
+      if (!mounted) return;
+      setState(() {
+        _assinaturaSincronizada = true;
+        _enviandoMidia = false;
+      });
+      if (!silencioso) _toast('Assinatura enviada ao ERP.');
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _enviandoMidia = false);
+      if (!silencioso) _toast(e.message);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _enviandoMidia = false);
+      if (!silencioso) {
+        _toast('Falha ao enviar assinatura. Mantida localmente.');
+      }
+    }
+  }
+
+  Future<void> _adicionarFoto() async {
+    final origem = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Tirar foto'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Escolher da galeria'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (origem == null || !mounted) return;
+
+    try {
+      final escolhida = await _imagePicker.pickImage(
+        source: origem,
+        imageQuality: 85,
+        maxWidth: 1920,
+      );
+      if (escolhida == null || !mounted) return;
+
+      final pasta = await _pastaFotos(widget.osKey);
+      final nome =
+          '${DateTime.now().millisecondsSinceEpoch}_${_fotos.length + 1}.jpg';
+      final destino = File(p.join(pasta.path, nome));
+      await File(escolhida.path).copy(destino.path);
+      if (!mounted) return;
+      setState(() => _fotos.add(destino));
+      await _enviarFotoSePossivel(destino);
+    } catch (_) {
+      if (!mounted) return;
+      _toast('Não foi possível adicionar a foto.');
+    }
+  }
+
+  Future<void> _excluirFoto(File foto) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Excluir foto'),
+        content: const Text('Deseja remover esta foto da OS?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Excluir'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      if (await foto.exists()) await foto.delete();
+      await _marcarNaoSincronizado(foto);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _fotos.removeWhere((f) => f.path == foto.path);
+      _fotosSincronizadas.remove(foto.path);
+    });
+  }
+
+  void _verFoto(File foto) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        backgroundColor: Colors.black,
+        child: Stack(
+          children: [
+            InteractiveViewer(
+              child: AspectRatio(
+                aspectRatio: 3 / 4,
+                child: Image.file(foto, fit: BoxFit.contain),
+              ),
+            ),
+            Positioned(
+              top: 4,
+              right: 4,
+              child: IconButton(
+                onPressed: () => Navigator.pop(ctx),
+                icon: const Icon(Icons.close, color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _toast(String msg) {
@@ -379,21 +733,24 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      if (_inicioAtendimento == null || _inicioAtendimento!.isEmpty)
+                      if (_status == 'Pendente')
                         ElevatedButton.icon(
                           onPressed: (_salvando || finalizada) ? null : _iniciarAtendimento,
                           icon: const Icon(Icons.play_arrow),
                           label: const Text('Iniciar atendimento'),
                         )
                       else ...[
-                        Text(
-                          'Início: $_inicioAtendimento',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 15,
+                        if (_inicioAtendimento != null &&
+                            _inicioAtendimento!.isNotEmpty) ...[
+                          Text(
+                            'Início: $_inicioAtendimento',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 15,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 4),
+                          const SizedBox(height: 4),
+                        ],
                         Text(
                           finalizada
                               ? 'Atendimento finalizado.'
@@ -406,31 +763,21 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                 ),
                 const SizedBox(height: 10),
                 _Bloco(
-                  titulo: 'Serviço realizado',
-                  child: TextField(
-                    controller: _servicoRealizado,
-                    maxLines: 3,
-                    enabled: !finalizada && !_salvando,
-                    decoration: const InputDecoration(
-                      hintText: 'Descreva o serviço realizado',
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                _Bloco(
-                  titulo: 'Serviços',
+                  titulo: 'Serviços realizados',
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       OutlinedButton.icon(
-                        onPressed: (finalizada || _salvando) ? null : _adicionarServico,
+                        onPressed: (finalizada || _salvando)
+                            ? null
+                            : _adicionarServicoRealizado,
                         icon: const Icon(Icons.add),
-                        label: const Text('Adicionar do cadastro'),
+                        label: const Text('Adicionar serviço'),
                       ),
                       const SizedBox(height: 8),
                       if (_servicos.isEmpty)
                         const Text(
-                          'Nenhum serviço do ERP adicionado.',
+                          'Nenhum serviço realizado adicionado.',
                           style: TextStyle(color: AppTheme.muted, fontSize: 13),
                         )
                       else
@@ -439,50 +786,23 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 6),
                             child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Icon(
-                                  Icons.build_outlined,
-                                  size: 18,
-                                  color: AppTheme.muted,
+                                const Padding(
+                                  padding: EdgeInsets.only(top: 2),
+                                  child: Icon(
+                                    Icons.check_circle_outline,
+                                    size: 18,
+                                    color: AppTheme.muted,
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
                                 Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      if (item.codigo.isNotEmpty)
-                                        Text(
-                                          item.codigo,
-                                          style: const TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                            color: AppTheme.muted,
-                                          ),
-                                        ),
-                                      Text(
-                                        item.descricao,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      TextButton(
-                                        onPressed: (finalizada || _salvando)
-                                            ? null
-                                            : () => _editarValorServico(e.key),
-                                        style: TextButton.styleFrom(
-                                          padding: EdgeInsets.zero,
-                                          minimumSize: Size.zero,
-                                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                          foregroundColor: AppTheme.primaryBlue,
-                                        ),
-                                        child: Text(
-                                          _fmtMoney(item.preco),
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w800,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
+                                  child: Text(
+                                    item.descricao,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
                                 ),
                                 if (!finalizada)
@@ -492,7 +812,9 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                                     onPressed: _salvando
                                         ? null
                                         : () {
-                                            setState(() => _servicos.removeAt(e.key));
+                                            setState(
+                                              () => _servicos.removeAt(e.key),
+                                            );
                                           },
                                     icon: const Icon(Icons.close, size: 18),
                                   ),
@@ -510,30 +832,83 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       OutlinedButton.icon(
-                        onPressed: (finalizada || _salvando) ? null : _adicionarPeca,
+                        onPressed:
+                            (finalizada || _salvando) ? null : _adicionarPeca,
                         icon: const Icon(Icons.add),
-                        label: const Text('Adicionar do cadastro'),
+                        label: const Text('Adicionar peça'),
                       ),
                       const SizedBox(height: 8),
                       if (_pecas.isEmpty)
                         const Text(
-                          'Nenhum produto do ERP adicionado.',
+                          'Nenhuma peça/produto adicionada.',
                           style: TextStyle(color: AppTheme.muted, fontSize: 13),
                         )
-                      else
+                      else ...[
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 6),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                flex: 4,
+                                child: Text(
+                                  'Produto',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 40,
+                                child: Text(
+                                  'Qtd',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 64,
+                                child: Text(
+                                  'Valor',
+                                  textAlign: TextAlign.right,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 64,
+                                child: Text(
+                                  'Total',
+                                  textAlign: TextAlign.right,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(width: 36),
+                            ],
+                          ),
+                        ),
                         ..._pecas.asMap().entries.map((e) {
                           final peca = e.value;
+                          final total = peca.preco * peca.qtd;
                           return Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
+                            padding: const EdgeInsets.only(bottom: 8),
                             child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Icon(
-                                  Icons.inventory_2_outlined,
-                                  size: 18,
-                                  color: AppTheme.muted,
-                                ),
-                                const SizedBox(width: 8),
                                 Expanded(
+                                  flex: 4,
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
@@ -550,26 +925,69 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                                         peca.descricao,
                                         style: const TextStyle(
                                           fontWeight: FontWeight.w600,
+                                          fontSize: 13,
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
-                                if (!finalizada)
-                                  IconButton(
-                                    tooltip: 'Remover',
-                                    visualDensity: VisualDensity.compact,
-                                    onPressed: _salvando
-                                        ? null
-                                        : () {
-                                            setState(() => _pecas.removeAt(e.key));
-                                          },
-                                    icon: const Icon(Icons.close, size: 18),
+                                SizedBox(
+                                  width: 40,
+                                  child: Text(
+                                    _fmtQtd(peca.qtd),
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 13,
+                                    ),
                                   ),
+                                ),
+                                SizedBox(
+                                  width: 64,
+                                  child: Text(
+                                    _fmtMoney(peca.preco),
+                                    textAlign: TextAlign.right,
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 64,
+                                  child: Text(
+                                    _fmtMoney(total),
+                                    textAlign: TextAlign.right,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 36,
+                                  child: (!finalizada)
+                                      ? IconButton(
+                                          tooltip: 'Excluir',
+                                          visualDensity: VisualDensity.compact,
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(
+                                            minWidth: 32,
+                                            minHeight: 32,
+                                          ),
+                                          onPressed: _salvando
+                                              ? null
+                                              : () {
+                                                  setState(
+                                                    () => _pecas.removeAt(e.key),
+                                                  );
+                                                },
+                                          icon: const Icon(Icons.close, size: 18),
+                                        )
+                                      : const SizedBox.shrink(),
+                                ),
                               ],
                             ),
                           );
                         }),
+                      ],
                     ],
                   ),
                 ),
@@ -592,23 +1010,86 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       OutlinedButton.icon(
-                        onPressed: (finalizada || _salvando)
-                            ? null
-                            : () {
-                                setState(() => _fotosMock++);
-                                _toast('Foto adicionada (mock).');
-                              },
+                        onPressed:
+                            (finalizada || _salvando) ? null : _adicionarFoto,
                         icon: const Icon(Icons.add_a_photo_outlined),
                         label: const Text('+ Adicionar foto'),
                       ),
-                      if (_fotosMock > 0) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          '$_fotosMock foto(s) (visual mock)',
-                          style: const TextStyle(
-                            color: AppTheme.muted,
-                            fontSize: 13,
-                          ),
+                      if (_fotos.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: _fotos.map((foto) {
+                            final sync = _fotosSincronizadas.contains(foto.path);
+                            return SizedBox(
+                              width: 88,
+                              height: 88,
+                              child: Stack(
+                                clipBehavior: Clip.none,
+                                children: [
+                                  Positioned.fill(
+                                    child: Material(
+                                      color: const Color(0xFFF8FAFC),
+                                      borderRadius: BorderRadius.circular(8),
+                                      clipBehavior: Clip.antiAlias,
+                                      child: InkWell(
+                                        onTap: () => _verFoto(foto),
+                                        child: Image.file(
+                                          foto,
+                                          fit: BoxFit.cover,
+                                          errorBuilder: (_, error, stackTrace) =>
+                                              const Center(
+                                            child: Icon(
+                                              Icons.broken_image_outlined,
+                                              color: AppTheme.muted,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Positioned(
+                                    left: 4,
+                                    bottom: 4,
+                                    child: Icon(
+                                      sync
+                                          ? Icons.cloud_done_outlined
+                                          : Icons.cloud_upload_outlined,
+                                      size: 16,
+                                      color: sync
+                                          ? const Color(0xFF15803D)
+                                          : const Color(0xFFB45309),
+                                    ),
+                                  ),
+                                  if (!finalizada)
+                                    Positioned(
+                                      top: -6,
+                                      right: -6,
+                                      child: Material(
+                                        color: Colors.white,
+                                        shape: const CircleBorder(),
+                                        elevation: 1,
+                                        child: InkWell(
+                                          customBorder: const CircleBorder(),
+                                          onTap: _salvando
+                                              ? null
+                                              : () => _excluirFoto(foto),
+                                          child: const Padding(
+                                            padding: EdgeInsets.all(4),
+                                            child: Icon(
+                                              Icons.close,
+                                              size: 16,
+                                              color: Color(0xFFB45309),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            );
+                          }).toList(),
                         ),
                       ],
                     ],
@@ -623,29 +1104,41 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                       OutlinedButton.icon(
                         onPressed: (finalizada || _salvando)
                             ? null
-                            : () {
-                                setState(() => _assinaturaColetada = true);
-                                _toast('Assinatura coletada (mock).');
-                              },
+                            : _coletarAssinatura,
                         icon: const Icon(Icons.draw_outlined),
-                        label: const Text('Coletar assinatura'),
+                        label: Text(
+                          _assinaturaPng == null
+                              ? 'Coletar assinatura'
+                              : 'Refazer assinatura',
+                        ),
                       ),
-                      if (_assinaturaColetada) ...[
+                      if (_assinaturaPng != null) ...[
                         const SizedBox(height: 8),
                         Container(
-                          height: 72,
-                          alignment: Alignment.center,
+                          height: 96,
+                          padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
                             color: const Color(0xFFF8FAFC),
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(color: AppTheme.border),
                           ),
-                          child: const Text(
-                            'Assinatura coletada (mock)',
-                            style: TextStyle(
-                              color: AppTheme.muted,
-                              fontWeight: FontWeight.w600,
-                            ),
+                          child: Image.memory(
+                            _assinaturaPng!,
+                            fit: BoxFit.contain,
+                            gaplessPlayback: true,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          _assinaturaSincronizada
+                              ? 'Assinatura sincronizada'
+                              : 'Assinatura local (aguardando envio)',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: _assinaturaSincronizada
+                                ? const Color(0xFF15803D)
+                                : const Color(0xFFB45309),
                           ),
                         ),
                       ],
@@ -685,7 +1178,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                       ),
                       onPressed: (_salvando || finalizada)
                           ? null
-                          : () => _salvar(finalizar: true),
+                          : _finalizarOs,
                       child: const Text('Finalizar OS'),
                     ),
                   ),
@@ -747,7 +1240,7 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
       final lista = await _osService.buscarProdutos(_busca.text, tipo: widget.tipo);
       if (!mounted) return;
       setState(() {
-        _lista = lista;
+        _lista = lista.take(20).toList();
         _buscando = false;
         if (lista.isEmpty && _busca.text.trim().isNotEmpty) {
           _erro = widget.tipo == 'servico'
@@ -782,7 +1275,9 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
               autofocus: true,
               decoration: InputDecoration(
                 labelText: 'Buscar no ERP',
-                hintText: 'Código ou descrição',
+                hintText: isServico
+                    ? 'Código ou descrição'
+                    : 'Código, código de barras ou descrição',
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _buscando
                     ? const Padding(
@@ -812,7 +1307,7 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
                       child: Text(
                         isServico
                             ? 'Digite para buscar serviços cadastrados.'
-                            : 'Digite para buscar produtos cadastrados.',
+                            : 'Digite código, barras ou descrição.',
                         textAlign: TextAlign.center,
                         style: const TextStyle(color: AppTheme.muted),
                       ),
@@ -832,8 +1327,7 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
                             [
                               if (p.codigo.isNotEmpty) 'Cód. ${p.codigo}',
                               if (p.unidade.isNotEmpty) p.unidade,
-                              if (isServico)
-                                'R\$ ${p.preco.toStringAsFixed(2).replaceAll('.', ',')}',
+                              'R\$ ${p.preco.toStringAsFixed(2).replaceAll('.', ',')}',
                             ].join(' • '),
                           ),
                           onTap: () => Navigator.of(context).pop(p),
@@ -955,88 +1449,101 @@ class _CampoComAcao extends StatelessWidget {
   }
 }
 
-class _ValorServicoDialog extends StatefulWidget {
-  const _ValorServicoDialog({
-    required this.titulo,
-    required this.descricao,
-    required this.codigo,
-    required this.valorInicial,
-    required this.confirmarLabel,
-  });
-
-  final String titulo;
-  final String descricao;
-  final String codigo;
-  final double valorInicial;
-  final String confirmarLabel;
+class _QuantidadePecaDialog extends StatefulWidget {
+  const _QuantidadePecaDialog();
 
   @override
-  State<_ValorServicoDialog> createState() => _ValorServicoDialogState();
+  State<_QuantidadePecaDialog> createState() => _QuantidadePecaDialogState();
 }
 
-class _ValorServicoDialogState extends State<_ValorServicoDialog> {
-  late final TextEditingController _precoCtrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _precoCtrl = TextEditingController(
-      text: widget.valorInicial.toStringAsFixed(2).replaceAll('.', ','),
-    );
-  }
+class _QuantidadePecaDialogState extends State<_QuantidadePecaDialog> {
+  final _ctrl = TextEditingController(text: '1');
 
   @override
   void dispose() {
-    _precoCtrl.dispose();
+    _ctrl.dispose();
     super.dispose();
   }
 
   void _confirmar() {
-    final raw = _precoCtrl.text.trim().replaceAll('.', '').replaceAll(',', '.');
-    final preco = double.tryParse(raw) ?? widget.valorInicial;
-    Navigator.of(context).pop(preco);
+    final raw = _ctrl.text.trim().replaceAll('.', '').replaceAll(',', '.');
+    final qtd = double.tryParse(raw);
+    if (qtd == null || qtd <= 0) return;
+    Navigator.of(context).pop(qtd);
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(widget.titulo),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            widget.descricao,
-            style: const TextStyle(fontWeight: FontWeight.w700),
-          ),
-          if (widget.codigo.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              'Cód. ${widget.codigo}',
-              style: const TextStyle(color: AppTheme.muted, fontSize: 12),
-            ),
-          ],
-          const SizedBox(height: 14),
-          TextField(
-            controller: _precoCtrl,
-            autofocus: true,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(
-              labelText: 'Valor (R\$)',
-              hintText: '0,00',
-            ),
-            onSubmitted: (_) => _confirmar(),
-          ),
-        ],
+      title: const Text('Quantidade'),
+      content: TextField(
+        controller: _ctrl,
+        autofocus: true,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: const InputDecoration(
+          labelText: 'Qtd',
+          hintText: '1',
+        ),
+        onSubmitted: (_) => _confirmar(),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancelar'),
         ),
-        TextButton(
+        ElevatedButton(
           onPressed: _confirmar,
-          child: Text(widget.confirmarLabel),
+          child: const Text('Adicionar'),
+        ),
+      ],
+    );
+  }
+}
+
+class _DescricaoServicoDialog extends StatefulWidget {
+  const _DescricaoServicoDialog();
+
+  @override
+  State<_DescricaoServicoDialog> createState() => _DescricaoServicoDialogState();
+}
+
+class _DescricaoServicoDialogState extends State<_DescricaoServicoDialog> {
+  final _ctrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _confirmar() {
+    final texto = _ctrl.text.trim();
+    if (texto.isEmpty) return;
+    Navigator.of(context).pop(texto);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Serviço realizado'),
+      content: TextField(
+        controller: _ctrl,
+        autofocus: true,
+        maxLines: 3,
+        textCapitalization: TextCapitalization.sentences,
+        decoration: const InputDecoration(
+          hintText: 'Descreva o serviço realizado',
+        ),
+        onSubmitted: (_) => _confirmar(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancelar'),
+        ),
+        ElevatedButton(
+          onPressed: _confirmar,
+          child: const Text('Adicionar'),
         ),
       ],
     );

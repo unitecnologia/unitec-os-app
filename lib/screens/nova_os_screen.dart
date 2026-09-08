@@ -19,6 +19,7 @@ class NovaOsScreen extends StatefulWidget {
 class _NovaOsScreenState extends State<NovaOsScreen> {
   final _osService = OsService();
   final _cliente = TextEditingController();
+  final _fantasia = TextEditingController();
   final _cpfCnpj = TextEditingController();
   final _telefone = TextEditingController();
   final _email = TextEditingController();
@@ -30,7 +31,11 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
   final _uf = TextEditingController();
   final _equipamento = TextEditingController();
   final _problema = TextEditingController();
+
   final _clienteFocus = FocusNode();
+  final _cpfCnpjFocus = FocusNode();
+  final _cepFocus = FocusNode();
+  final _numeroFocus = FocusNode();
 
   int? _clienteId;
   List<ClienteResumo> _sugestoes = [];
@@ -38,29 +43,29 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
   bool _buscandoCnpj = false;
   bool _buscandoCep = false;
   bool _salvando = false;
+  bool _preenchendoAuto = false;
+  bool _enderecoViaCnpj = false;
   String? _ultimoCnpjConsultado;
   String? _ultimoCepConsultado;
+  final Set<String> _tocado = {};
   Timer? _debounce;
-  Timer? _debounceDoc;
-  Timer? _debounceCep;
 
   @override
   void initState() {
     super.initState();
     _cliente.addListener(_onClienteChanged);
-    _cpfCnpj.addListener(_onDocChanged);
-    _cep.addListener(_onCepChanged);
+    _cpfCnpjFocus.addListener(_onCpfCnpjFocusChanged);
+    _cepFocus.addListener(_onCepFocusChanged);
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
-    _debounceDoc?.cancel();
-    _debounceCep?.cancel();
     _cliente.removeListener(_onClienteChanged);
-    _cpfCnpj.removeListener(_onDocChanged);
-    _cep.removeListener(_onCepChanged);
+    _cpfCnpjFocus.removeListener(_onCpfCnpjFocusChanged);
+    _cepFocus.removeListener(_onCepFocusChanged);
     _cliente.dispose();
+    _fantasia.dispose();
     _cpfCnpj.dispose();
     _telefone.dispose();
     _email.dispose();
@@ -73,10 +78,44 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
     _equipamento.dispose();
     _problema.dispose();
     _clienteFocus.dispose();
+    _cpfCnpjFocus.dispose();
+    _cepFocus.dispose();
+    _numeroFocus.dispose();
     super.dispose();
   }
 
   String _somenteDigitos(String v) => v.replaceAll(RegExp(r'\D'), '');
+
+  bool _semConexao(Object e) {
+    final msg = e is ApiException ? e.message.toLowerCase() : e.toString().toLowerCase();
+    return msg.contains('sem conexão') ||
+        msg.contains('socket') ||
+        msg.contains('host inacess') ||
+        msg.contains('tls/ssl') ||
+        msg.contains('tempo esgotado') ||
+        msg.contains('network');
+  }
+
+  void _marcarTocado(String campo) {
+    if (_preenchendoAuto) return;
+    _tocado.add(campo);
+  }
+
+  void _setAuto(TextEditingController controller, String campo, String valor) {
+    final v = valor.trim();
+    if (v.isEmpty) return;
+    if (_tocado.contains(campo)) return;
+    _preenchendoAuto = true;
+    controller.text = v;
+    _preenchendoAuto = false;
+  }
+
+  void _focarNumero() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _numeroFocus.requestFocus();
+    });
+  }
 
   void _onClienteChanged() {
     if (_clienteId != null) {
@@ -92,14 +131,16 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
     _debounce = Timer(const Duration(milliseconds: 350), _buscarClientes);
   }
 
-  void _onDocChanged() {
-    _debounceDoc?.cancel();
-    _debounceDoc = Timer(const Duration(milliseconds: 500), _aoDocumentoPronto);
+  void _onCpfCnpjFocusChanged() {
+    if (!_cpfCnpjFocus.hasFocus) {
+      unawaited(_aoDocumentoPronto());
+    }
   }
 
-  void _onCepChanged() {
-    _debounceCep?.cancel();
-    _debounceCep = Timer(const Duration(milliseconds: 450), _aoCepPronto);
+  void _onCepFocusChanged() {
+    if (!_cepFocus.hasFocus) {
+      unawaited(_aoCepPronto());
+    }
   }
 
   Future<void> _buscarClientes() async {
@@ -129,7 +170,6 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
   Future<void> _aoDocumentoPronto() async {
     final digits = _somenteDigitos(_cpfCnpj.text);
     if (digits.length == 11 || digits.length == 14) {
-      // Tenta achar cliente já cadastrado pelo documento.
       try {
         final lista = await _osService.buscarClientes(digits);
         if (!mounted) return;
@@ -155,46 +195,59 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
       final data = await _osService.consultarCnpj(digits);
       if (!mounted) return;
       _ultimoCnpjConsultado = digits;
+
+      final razao = (data['nome_razao'] ?? '').trim();
+      final fantasia = (data['apelido_fantasia'] ?? '').trim();
+      final fone = (data['fone1'] ?? data['fone2'] ?? '').trim();
+      final email = (data['email'] ?? '').trim();
+      final cep = (data['cep'] ?? '').trim();
+      final end = (data['endereco'] ?? '').trim();
+      final num = (data['numero'] ?? '').trim();
+      final bairro = (data['bairro'] ?? '').trim();
+      final cidade = (data['cidade_nome'] ?? '').trim();
+      final uf = (data['uf'] ?? '').trim();
+
       setState(() {
-        final razao = (data['nome_razao'] ?? '').trim();
-        if (razao.isNotEmpty && _cliente.text.trim().isEmpty) {
-          _cliente.text = razao.toUpperCase();
-          _clienteId = null;
-        } else if (razao.isNotEmpty) {
-          _cliente.text = razao.toUpperCase();
-          _clienteId = null;
-        }
-        final fone = (data['fone1'] ?? data['fone2'] ?? '').trim();
-        if (fone.isNotEmpty) _telefone.text = fone;
-        final email = (data['email'] ?? '').trim();
-        if (email.isNotEmpty) _email.text = email;
-        final cep = (data['cep'] ?? '').trim();
+        _setAuto(_cliente, 'cliente', razao.toUpperCase());
+        if (razao.isNotEmpty) _clienteId = null;
+        _setAuto(_fantasia, 'fantasia', fantasia.toUpperCase());
+        _setAuto(_telefone, 'telefone', fone);
+        _setAuto(_email, 'email', email);
         if (cep.isNotEmpty) {
-          _cep.text = cep;
+          _setAuto(_cep, 'cep', cep);
           _ultimoCepConsultado = _somenteDigitos(cep);
         }
-        final end = (data['endereco'] ?? '').trim();
-        if (end.isNotEmpty) _endereco.text = end.toUpperCase();
-        final num = (data['numero'] ?? '').trim();
-        if (num.isNotEmpty) _numero.text = num;
-        final bairro = (data['bairro'] ?? '').trim();
-        if (bairro.isNotEmpty) _bairro.text = bairro.toUpperCase();
-        final cidade = (data['cidade_nome'] ?? '').trim();
-        if (cidade.isNotEmpty) _cidade.text = cidade.toUpperCase();
-        final uf = (data['uf'] ?? '').trim();
-        if (uf.isNotEmpty) _uf.text = uf.toUpperCase();
+        _setAuto(_endereco, 'endereco', end.toUpperCase());
+        _setAuto(_numero, 'numero', num);
+        _setAuto(_bairro, 'bairro', bairro.toUpperCase());
+        _setAuto(_cidade, 'cidade', cidade.toUpperCase());
+        _setAuto(_uf, 'uf', uf.toUpperCase());
+        _enderecoViaCnpj = end.isNotEmpty ||
+            bairro.isNotEmpty ||
+            cidade.isNotEmpty ||
+            uf.isNotEmpty;
         _sugestoes = [];
         _buscandoCnpj = false;
       });
+
       _toast('Cadastro do CNPJ preenchido automaticamente.');
+      if (_enderecoViaCnpj || cep.isNotEmpty) {
+        _focarNumero();
+      }
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() => _buscandoCnpj = false);
-      _toast(e.message);
-    } catch (_) {
+      if (_semConexao(e)) {
+        _toast('Sem conexão. Preencha o cadastro manualmente.');
+      } else {
+        _toast(e.message.trim().isEmpty ? 'CNPJ não encontrado.' : e.message);
+      }
+    } catch (e) {
       if (!mounted) return;
       setState(() => _buscandoCnpj = false);
-      _toast('Não foi possível consultar o CNPJ.');
+      _toast(_semConexao(e)
+          ? 'Sem conexão. Preencha o cadastro manualmente.'
+          : 'Não foi possível consultar o CNPJ.');
     }
   }
 
@@ -203,36 +256,46 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
     if (digits.length != 8 || digits == _ultimoCepConsultado || _buscandoCep) {
       return;
     }
+
     setState(() => _buscandoCep = true);
     try {
       final data = await _osService.consultarCep(digits);
       if (!mounted) return;
       _ultimoCepConsultado = digits;
       setState(() {
-        final end = (data['endereco'] ?? '').trim();
-        if (end.isNotEmpty) _endereco.text = end;
-        final bairro = (data['bairro'] ?? '').trim();
-        if (bairro.isNotEmpty) _bairro.text = bairro;
-        final cidade = (data['cidade_nome'] ?? '').trim();
-        if (cidade.isNotEmpty) _cidade.text = cidade;
-        final uf = (data['uf'] ?? '').trim();
-        if (uf.isNotEmpty) _uf.text = uf;
+        _setAuto(_endereco, 'endereco', (data['endereco'] ?? '').trim());
+        _setAuto(_bairro, 'bairro', (data['bairro'] ?? '').trim());
+        _setAuto(_cidade, 'cidade', (data['cidade_nome'] ?? '').trim());
+        _setAuto(_uf, 'uf', (data['uf'] ?? '').trim());
         final cepFmt = (data['cep'] ?? '').trim();
-        if (cepFmt.isNotEmpty) _cep.text = cepFmt;
+        if (cepFmt.isNotEmpty && !_tocado.contains('cep')) {
+          _preenchendoAuto = true;
+          _cep.text = cepFmt;
+          _preenchendoAuto = false;
+        }
         _buscandoCep = false;
       });
+      _focarNumero();
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() => _buscandoCep = false);
-      _toast(e.message);
-    } catch (_) {
+      if (_semConexao(e)) {
+        _toast('Sem conexão. Preencha o endereço manualmente.');
+      } else {
+        _toast(e.message.trim().isEmpty ? 'CEP não encontrado.' : e.message);
+      }
+    } catch (e) {
       if (!mounted) return;
       setState(() => _buscandoCep = false);
+      if (_semConexao(e)) {
+        _toast('Sem conexão. Preencha o endereço manualmente.');
+      }
     }
   }
 
   void _selecionarCliente(ClienteResumo c) {
     setState(() {
+      _preenchendoAuto = true;
       _clienteId = c.id;
       _cliente.text = c.nome;
       if (c.cpfCnpj.isNotEmpty) {
@@ -251,6 +314,8 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
       if (c.cidade.isNotEmpty) _cidade.text = c.cidade;
       if (c.uf.isNotEmpty) _uf.text = c.uf;
       _sugestoes = [];
+      _enderecoViaCnpj = false;
+      _preenchendoAuto = false;
     });
     _clienteFocus.unfocus();
   }
@@ -273,6 +338,7 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
       final result = await _osService.criarOs(
         clienteId: _clienteId,
         cliente: nome,
+        nomeFantasia: _fantasia.text,
         telefone: _telefone.text,
         email: _email.text,
         cpfCnpj: _cpfCnpj.text,
@@ -314,21 +380,34 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
   Widget _campo({
     required TextEditingController controller,
     required String label,
+    required String campoKey,
+    FocusNode? focusNode,
     TextInputType? keyboardType,
     List<TextInputFormatter>? inputFormatters,
     int maxLines = 1,
     int? maxLength,
     Widget? suffix,
     TextCapitalization textCapitalization = TextCapitalization.none,
+    VoidCallback? onEditingComplete,
+    ValueChanged<String>? onChanged,
+    TextInputAction? textInputAction,
   }) {
     return TextField(
       controller: controller,
+      focusNode: focusNode,
       enabled: !_salvando,
       maxLines: maxLines,
       maxLength: maxLength,
       keyboardType: keyboardType,
       inputFormatters: inputFormatters,
       textCapitalization: textCapitalization,
+      textInputAction: textInputAction ?? TextInputAction.next,
+      onChanged: (v) {
+        _marcarTocado(campoKey);
+        onChanged?.call(v);
+      },
+      onEditingComplete: onEditingComplete,
+      onSubmitted: (_) => onEditingComplete?.call(),
       decoration: InputDecoration(
         labelText: label,
         counterText: '',
@@ -353,11 +432,18 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
           _campo(
             controller: _cpfCnpj,
             label: 'CPF ou CNPJ',
+            campoKey: 'cpfCnpj',
+            focusNode: _cpfCnpjFocus,
             keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.done,
             inputFormatters: [
               FilteringTextInputFormatter.digitsOnly,
               LengthLimitingTextInputFormatter(14),
             ],
+            onEditingComplete: () {
+              _cpfCnpjFocus.unfocus();
+              unawaited(_aoDocumentoPronto());
+            },
             suffix: _buscandoCnpj
                 ? const Padding(
                     padding: EdgeInsets.all(12),
@@ -374,8 +460,9 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
             controller: _cliente,
             focusNode: _clienteFocus,
             enabled: !_salvando,
+            onChanged: (_) => _marcarTocado('cliente'),
             decoration: InputDecoration(
-              labelText: 'Cliente',
+              labelText: 'Razão Social / Cliente',
               suffixIcon: _buscando
                   ? const Padding(
                       padding: EdgeInsets.all(12),
@@ -417,25 +504,47 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
           ],
           const SizedBox(height: 12),
           _campo(
+            controller: _fantasia,
+            label: 'Nome Fantasia',
+            campoKey: 'fantasia',
+            textCapitalization: TextCapitalization.characters,
+          ),
+          const SizedBox(height: 12),
+          _campo(
             controller: _telefone,
             label: 'Telefone',
+            campoKey: 'telefone',
             keyboardType: TextInputType.phone,
           ),
           const SizedBox(height: 12),
           _campo(
             controller: _email,
             label: 'E-mail',
+            campoKey: 'email',
             keyboardType: TextInputType.emailAddress,
           ),
           const SizedBox(height: 12),
           _campo(
             controller: _cep,
             label: 'CEP',
+            campoKey: 'cep',
+            focusNode: _cepFocus,
             keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.done,
             inputFormatters: [
               FilteringTextInputFormatter.digitsOnly,
               LengthLimitingTextInputFormatter(8),
             ],
+            onEditingComplete: () {
+              _cepFocus.unfocus();
+              unawaited(_aoCepPronto());
+            },
+            onChanged: (_) {
+              // CEP alterado manualmente: libera nova consulta e não bloqueia por CNPJ.
+              if (!_preenchendoAuto) {
+                _enderecoViaCnpj = false;
+              }
+            },
             suffix: _buscandoCep
                 ? const Padding(
                     padding: EdgeInsets.all(12),
@@ -451,6 +560,7 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
           _campo(
             controller: _endereco,
             label: 'Endereço',
+            campoKey: 'endereco',
             textCapitalization: TextCapitalization.characters,
           ),
           const SizedBox(height: 12),
@@ -461,6 +571,8 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
                 child: _campo(
                   controller: _numero,
                   label: 'Número',
+                  campoKey: 'numero',
+                  focusNode: _numeroFocus,
                   keyboardType: TextInputType.text,
                 ),
               ),
@@ -470,6 +582,7 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
                 child: _campo(
                   controller: _bairro,
                   label: 'Bairro',
+                  campoKey: 'bairro',
                   textCapitalization: TextCapitalization.characters,
                 ),
               ),
@@ -483,6 +596,7 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
                 child: _campo(
                   controller: _cidade,
                   label: 'Cidade',
+                  campoKey: 'cidade',
                   textCapitalization: TextCapitalization.characters,
                 ),
               ),
@@ -491,6 +605,7 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
                 child: _campo(
                   controller: _uf,
                   label: 'UF',
+                  campoKey: 'uf',
                   maxLength: 2,
                   textCapitalization: TextCapitalization.characters,
                   inputFormatters: [
@@ -505,12 +620,14 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
           _campo(
             controller: _equipamento,
             label: 'Equipamento',
+            campoKey: 'equipamento',
             textCapitalization: TextCapitalization.characters,
           ),
           const SizedBox(height: 12),
           _campo(
             controller: _problema,
             label: 'Problema informado',
+            campoKey: 'problema',
             maxLines: 3,
           ),
           const SizedBox(height: 24),

@@ -26,16 +26,31 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
   final _sync = SyncService.instance;
 
   String _filtro = 'Todas';
+  DateTime _filtroData = DateTime(
+    DateTime.now().year,
+    DateTime.now().month,
+    DateTime.now().day,
+  );
   List<OrdemServico> _todas = [];
   bool _carregando = true;
   String? _erro;
 
+  List<OrdemServico> get _listaDoDia =>
+      _todas.where((os) => _dataHoraNoDia(os.dataHora, _filtroData)).toList();
+
   List<OrdemServico> get _lista {
-    if (_filtro == 'Todas') return _todas;
-    return _todas.where((os) => os.status == _filtro).toList();
+    if (_filtro == 'Todas') return _listaDoDia;
+    return _listaDoDia.where((os) => os.status == _filtro).toList();
   }
 
-  int _contar(String status) => _todas.where((os) => os.status == status).length;
+  int _contar(String status) =>
+      _listaDoDia.where((os) => os.status == status).length;
+
+  String get _filtroDataLabel {
+    final d = _filtroData.day.toString().padLeft(2, '0');
+    final m = _filtroData.month.toString().padLeft(2, '0');
+    return '$d/$m/${_filtroData.year}';
+  }
 
   @override
   void initState() {
@@ -109,6 +124,19 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
     await _auth.logout();
     if (!mounted) return;
     Navigator.of(context).pushReplacementNamed(LoginScreen.route);
+  }
+
+  Future<void> _escolherData() async {
+    final escolhida = await showDatePicker(
+      context: context,
+      initialDate: _filtroData,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (escolhida == null || !mounted) return;
+    setState(() {
+      _filtroData = DateTime(escolhida.year, escolhida.month, escolhida.day);
+    });
   }
 
   Color _corStatus(String status) {
@@ -283,12 +311,48 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                         ],
                       ),
                       const SizedBox(height: 12),
+                      Material(
+                        color: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: const BorderSide(color: AppTheme.border),
+                        ),
+                        child: InkWell(
+                          onTap: _escolherData,
+                          borderRadius: BorderRadius.circular(8),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.calendar_today_outlined,
+                                  size: 18,
+                                  color: AppTheme.primaryBlue,
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  _filtroDataLabel,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppTheme.text,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
                       if (_lista.isEmpty)
                         const Padding(
                           padding: EdgeInsets.only(top: 40),
                           child: Center(
                             child: Text(
-                              'Nenhuma OS para este técnico.',
+                              'Nenhuma OS nesta data.',
                               style: TextStyle(color: AppTheme.muted),
                             ),
                           ),
@@ -399,6 +463,29 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                 ),
     );
   }
+}
+
+/// Compara `dataHora` (`dd/MM/yyyy HH:mm` ou `dd/MM HH:mm`) com o dia filtrado.
+bool _dataHoraNoDia(String dataHora, DateTime dia) {
+  final partesEspaco = dataHora.trim().split(RegExp(r'\s+'));
+  if (partesEspaco.isEmpty) return false;
+  final parteData = partesEspaco.first;
+  if (parteData.isEmpty) return false;
+
+  final partes = parteData.split('/');
+  if (partes.length < 2 || partes.length > 3) return false;
+
+  final diaOs = int.tryParse(partes[0]);
+  final mesOs = int.tryParse(partes[1]);
+  if (diaOs == null || mesOs == null) return false;
+  if (diaOs != dia.day || mesOs != dia.month) return false;
+
+  if (partes.length == 3) {
+    final anoOs = int.tryParse(partes[2]);
+    if (anoOs == null || anoOs != dia.year) return false;
+  }
+
+  return true;
 }
 
 class _ResumoCard extends StatelessWidget {
