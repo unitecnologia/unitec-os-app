@@ -11,8 +11,11 @@ import 'package:unitec_os_app/models/peca_os.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/services/os_service.dart';
 import 'package:unitec_os_app/services/sync_service.dart';
+import 'package:unitec_os_app/services/whatsapp_contato.dart';
 import 'package:unitec_os_app/theme/app_theme.dart';
 import 'package:unitec_os_app/widgets/assinatura_pad_dialog.dart';
+import 'package:unitec_os_app/widgets/barcode_scan_page.dart';
+import 'package:unitec_os_app/widgets/peca_lancada_card.dart';
 
 class DetalheOsScreen extends StatefulWidget {
   const DetalheOsScreen({super.key, required this.osKey});
@@ -25,10 +28,13 @@ class DetalheOsScreen extends StatefulWidget {
   State<DetalheOsScreen> createState() => _DetalheOsScreenState();
 }
 
-class _DetalheOsScreenState extends State<DetalheOsScreen> {
+class _DetalheOsScreenState extends State<DetalheOsScreen> with WidgetsBindingObserver {
   final _osService = OsService();
   final _servicoRealizado = TextEditingController();
   final _observacoes = TextEditingController();
+  Timer? _persistirServicoTimer;
+  bool _gravandoServico = false;
+  bool _servicoPrestadoSujo = false;
 
   OrdemServico? _os;
   bool _carregando = true;
@@ -47,14 +53,31 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _carregar();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _persistirServicoTimer?.cancel();
+    final os = _os;
+    final texto = _servicoRealizado.text.trim();
+    if (os != null && texto != os.servicoRealizado.trim()) {
+      unawaited(_osService.gravarServicoPrestadoLocal(os, texto));
+    }
     _servicoRealizado.dispose();
     _observacoes.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      unawaited(_persistirServicoPrestadoAgora());
+    }
   }
 
   Future<void> _carregar() async {
@@ -116,6 +139,47 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     }
   }
 
+  void _agendarServicoPrestado(String _) {
+    if (_gravandoServico) _servicoPrestadoSujo = true;
+    _persistirServicoTimer?.cancel();
+    _persistirServicoTimer = Timer(const Duration(milliseconds: 500), () {
+      unawaited(_persistirServicoPrestadoAgora());
+    });
+  }
+
+  Future<void> _persistirServicoPrestadoAgora() async {
+    _persistirServicoTimer?.cancel();
+    final os = _os;
+    if (os == null) return;
+    if (_gravandoServico) {
+      _servicoPrestadoSujo = true;
+      return;
+    }
+    final texto = _servicoRealizado.text.trim();
+    if (texto == os.servicoRealizado.trim()) return;
+
+    _gravandoServico = true;
+    try {
+      final updated = await _osService.gravarServicoPrestadoLocal(os, texto);
+      if (!mounted) {
+        _os = updated;
+        return;
+      }
+      setState(() => _os = updated);
+    } catch (_) {
+      _servicoPrestadoSujo = true;
+    } finally {
+      _gravandoServico = false;
+      if (_servicoPrestadoSujo) {
+        _servicoPrestadoSujo = false;
+        final atual = _os;
+        if (atual != null && _servicoRealizado.text.trim() != atual.servicoRealizado.trim()) {
+          unawaited(_persistirServicoPrestadoAgora());
+        }
+      }
+    }
+  }
+
   Color _corStatus(String status) {
     switch (status) {
       case 'Pendente':
@@ -163,10 +227,13 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     setState(() => _salvando = true);
     try {
       final OrdemServico updated;
+      _persistirServicoTimer?.cancel();
+      final relato = _servicoRealizado.text.trim();
       if (finalizar) {
         updated = await _osService.atualizarAtendimento(
           os: _os!,
           observacoes: _observacoes.text.trim(),
+          servicoRealizado: relato,
           pecas: List<PecaOs>.from(_pecas),
           servicos: List<PecaOs>.from(_servicos),
           finalizar: true,
@@ -175,6 +242,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         updated = await _osService.atualizarAtendimento(
           os: _os!,
           observacoes: _observacoes.text.trim(),
+          servicoRealizado: relato,
           servicos: List<PecaOs>.from(_servicos),
           pecas: List<PecaOs>.from(_pecas),
         );
@@ -257,12 +325,15 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     final selecionado = await showDialog<ProdutoResumo>(
       context: context,
       builder: (ctx) => const _BuscarCatalogoDialog(
-        titulo: 'Adicionar peça / produto',
+        titulo: 'Selecionar peça',
         tipo: 'produto',
       ),
     );
     if (selecionado == null || !mounted) return;
+    await _confirmarQuantidadePeca(selecionado);
+  }
 
+  Future<void> _confirmarQuantidadePeca(ProdutoResumo selecionado) async {
     final qtd = await showDialog<double>(
       context: context,
       builder: (ctx) => const _QuantidadePecaDialog(),
@@ -274,6 +345,10 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         PecaOs(
           produtoId: selecionado.id,
           codigo: selecionado.codigo,
+          codigoBarras: selecionado.codigoBarras.isNotEmpty
+              ? selecionado.codigoBarras
+              : selecionado.codigoBarrasCaixa,
+          imei: selecionado.imei,
           descricao: selecionado.descricao,
           preco: selecionado.preco,
           qtd: qtd,
@@ -295,7 +370,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     final selecionado = await showDialog<ProdutoResumo>(
       context: context,
       builder: (ctx) => const _BuscarCatalogoDialog(
-        titulo: 'Adicionar serviço',
+        titulo: 'Selecionar serviço',
         tipo: 'servico',
       ),
     );
@@ -629,6 +704,13 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  Future<void> _abrirWhatsapp(String telefone) async {
+    final ok = await WhatsappContato.abrir(telefone);
+    if (!ok && mounted) {
+      _toast('Não foi possível abrir o WhatsApp.');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_carregando) {
@@ -664,7 +746,32 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     final corStatus = _corStatus(_status);
     final finalizada = _status == 'Finalizada' || _status == 'Em faturamento';
 
-    return Scaffold(
+    return Theme(
+      data: Theme.of(context).copyWith(
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppTheme.primaryBlue,
+            foregroundColor: Colors.white,
+            minimumSize: const Size.fromHeight(40),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: AppTheme.primaryBlue,
+            minimumSize: const Size.fromHeight(40),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            side: const BorderSide(color: AppTheme.primaryBlue),
+            textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+      ),
+      child: Scaffold(
       appBar: AppBar(
         title: Text('OS ${os.numeroExibicao}'),
         actions: [
@@ -679,11 +786,11 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         children: [
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
               children: [
                 Card(
                   child: Padding(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -692,7 +799,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                             Text(
                               'OS ${os.numeroExibicao}',
                               style: const TextStyle(
-                                fontSize: 18,
+                                fontSize: 16,
                                 fontWeight: FontWeight.w800,
                                 color: AppTheme.text,
                               ),
@@ -719,20 +826,21 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                           ],
                         ),
                         if (os.tecnico.isNotEmpty) ...[
-                          const SizedBox(height: 8),
+                          const SizedBox(height: 6),
                           _Campo(label: 'Técnico', valor: os.tecnico),
                         ],
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 4),
                         _Campo(label: 'Cliente', valor: os.cliente),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 4),
                         _CampoComAcao(
                           label: 'Telefone',
                           valor: os.telefone.isEmpty ? '—' : os.telefone,
-                          icone: Icons.phone,
-                          acaoLabel: 'Ligar',
-                          onPressed: () => _toast('Ligar (mock).'),
+                          icone: Icons.chat,
+                          corAcao: const Color(0xFF128C7E),
+                          acaoLabel: 'WhatsApp',
+                          onPressed: () => _abrirWhatsapp(os.telefone),
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 4),
                         _CampoComAcao(
                           label: 'Endereço',
                           valor: os.endereco.isEmpty ? '—' : os.endereco,
@@ -740,12 +848,12 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                           acaoLabel: 'Mapa',
                           onPressed: () => _toast('Mapa (mock).'),
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 4),
                         _Campo(
                           label: 'Equipamento',
                           valor: os.equipamento.isEmpty ? '—' : os.equipamento,
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 4),
                         _Campo(
                           label: 'Problema informado',
                           valor: os.problema.isEmpty ? '—' : os.problema,
@@ -754,7 +862,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 _Bloco(
                   titulo: 'Atendimento',
                   child: Column(
@@ -773,7 +881,8 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                             'Início: $_inicioAtendimento',
                             style: const TextStyle(
                               fontWeight: FontWeight.w700,
-                              fontSize: 15,
+                              fontSize: 14,
+                              height: 1.2,
                             ),
                           ),
                           const SizedBox(height: 4),
@@ -790,7 +899,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 _Bloco(
                   titulo: 'Serviços realizados',
                   child: Column(
@@ -976,15 +1085,37 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
+                _Bloco(
+                  titulo: 'Serviços prestados',
+                  child: TextField(
+                    controller: _servicoRealizado,
+                    minLines: 2,
+                    maxLines: null,
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    textAlignVertical: TextAlignVertical.top,
+                    enabled: !finalizada && !_salvando,
+                    onChanged: _agendarServicoPrestado,
+                    style: const TextStyle(fontSize: 14, height: 1.25),
+                    decoration: const InputDecoration(
+                      hintText: 'Descreva o que foi realizado no atendimento...',
+                      alignLabelWithHint: true,
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
                 _Bloco(
                   titulo: 'Peças / Produtos',
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       OutlinedButton.icon(
-                        onPressed:
-                            (finalizada || _salvando) ? null : _adicionarPeca,
+                        onPressed: (finalizada || _salvando)
+                            ? null
+                            : _adicionarPeca,
                         icon: const Icon(Icons.add),
                         label: const Text('Adicionar peça'),
                       ),
@@ -994,155 +1125,26 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                           'Nenhuma peça/produto adicionada.',
                           style: TextStyle(color: AppTheme.muted, fontSize: 13),
                         )
-                      else ...[
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 6),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                flex: 4,
-                                child: Text(
-                                  'Produto',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w800,
-                                    color: AppTheme.muted,
-                                  ),
-                                ),
-                              ),
-                              SizedBox(
-                                width: 40,
-                                child: Text(
-                                  'Qtd',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w800,
-                                    color: AppTheme.muted,
-                                  ),
-                                ),
-                              ),
-                              SizedBox(
-                                width: 64,
-                                child: Text(
-                                  'Valor',
-                                  textAlign: TextAlign.right,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w800,
-                                    color: AppTheme.muted,
-                                  ),
-                                ),
-                              ),
-                              SizedBox(
-                                width: 64,
-                                child: Text(
-                                  'Total',
-                                  textAlign: TextAlign.right,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w800,
-                                    color: AppTheme.muted,
-                                  ),
-                                ),
-                              ),
-                              SizedBox(width: 36),
-                            ],
-                          ),
-                        ),
+                      else
                         ..._pecas.asMap().entries.map((e) {
-                          final peca = e.value;
-                          final total = peca.preco * peca.qtd;
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 8),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  flex: 4,
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      if (peca.codigo.isNotEmpty)
-                                        Text(
-                                          peca.codigo,
-                                          style: const TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                            color: AppTheme.muted,
-                                          ),
-                                        ),
-                                      Text(
-                                        peca.descricao,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: 40,
-                                  child: Text(
-                                    _fmtQtd(peca.qtd),
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: 64,
-                                  child: Text(
-                                    _fmtMoney(peca.preco),
-                                    textAlign: TextAlign.right,
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: 64,
-                                  child: Text(
-                                    _fmtMoney(total),
-                                    textAlign: TextAlign.right,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: 36,
-                                  child: (!finalizada)
-                                      ? IconButton(
-                                          tooltip: 'Excluir',
-                                          visualDensity: VisualDensity.compact,
-                                          padding: EdgeInsets.zero,
-                                          constraints: const BoxConstraints(
-                                            minWidth: 32,
-                                            minHeight: 32,
-                                          ),
-                                          onPressed: _salvando
-                                              ? null
-                                              : () {
-                                                  setState(
-                                                    () => _pecas.removeAt(e.key),
-                                                  );
-                                                },
-                                          icon: const Icon(Icons.close, size: 18),
-                                        )
-                                      : const SizedBox.shrink(),
-                                ),
-                              ],
+                            child: PecaLancadaCard(
+                              peca: e.value,
+                              qtd: _fmtQtd(e.value.qtd),
+                              unitario: _fmtMoney(e.value.preco),
+                              total: _fmtMoney(e.value.preco * e.value.qtd),
+                              podeExcluir: !finalizada && !_salvando,
+                              onExcluir: () {
+                                setState(() => _pecas.removeAt(e.key));
+                              },
                             ),
                           );
                         }),
-                      ],
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 _Bloco(
                   titulo: 'Observações',
                   child: TextField(
@@ -1154,7 +1156,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 _Bloco(
                   titulo: 'Fotos',
                   child: Column(
@@ -1246,7 +1248,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 _Bloco(
                   titulo: 'Assinatura',
                   child: Column(
@@ -1302,7 +1304,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
           SafeArea(
             top: false,
             child: Container(
-              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
               decoration: const BoxDecoration(
                 color: Colors.white,
                 border: Border(top: BorderSide(color: AppTheme.border)),
@@ -1339,6 +1341,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
           ),
         ],
       ),
+    ),
     );
   }
 }
@@ -1363,6 +1366,7 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
   List<ProdutoResumo> _lista = [];
   bool _buscando = false;
   String? _erro;
+  int? _selecionadoId;
 
   @override
   void initState() {
@@ -1382,6 +1386,31 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
     _debounce = Timer(const Duration(milliseconds: 300), _buscar);
   }
 
+  Future<void> _escanear() async {
+    if (!SyncService.instance.podeTentarErp) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('O ERP precisa estar online para achar a peça pelo código.'),
+        ),
+      );
+      return;
+    }
+    final codigo = await BarcodeScanPage.abrir(context);
+    if (codigo == null || !mounted) return;
+    _busca.text = codigo.trim();
+    await _buscar();
+    if (!mounted || _lista.isEmpty) return;
+    final exatos = _lista.where((p) => p.correspondeCodigo(_busca.text)).toList();
+    if (exatos.length == 1) {
+      Navigator.of(context).pop(exatos.first);
+      return;
+    }
+    if (_lista.length == 1) {
+      Navigator.of(context).pop(_lista.first);
+    }
+  }
+
   Future<void> _buscar() async {
     setState(() {
       _buscando = true;
@@ -1391,12 +1420,15 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
       final lista = await _osService.buscarProdutos(_busca.text, tipo: widget.tipo);
       if (!mounted) return;
       setState(() {
-        _lista = lista.take(20).toList();
+        _lista = lista.take(25).toList();
         _buscando = false;
-        if (lista.isEmpty && _busca.text.trim().isNotEmpty) {
+        _selecionadoId = null;
+        if (lista.isEmpty && !SyncService.instance.podeTentarErp) {
+          _erro = 'ERP offline. A busca precisa do ERP respondendo.';
+        } else if (lista.isEmpty && _busca.text.trim().isNotEmpty) {
           _erro = widget.tipo == 'servico'
-              ? 'Nenhum serviço encontrado no ERP.'
-              : 'Nenhum produto encontrado no ERP.';
+              ? 'Nenhum serviço encontrado.'
+              : 'Nenhuma peça encontrada.';
         }
       });
     } catch (_) {
@@ -1409,27 +1441,74 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
     }
   }
 
+  void _escolher(ProdutoResumo item) {
+    if (_selecionadoId == item.id) {
+      Navigator.of(context).pop(item);
+      return;
+    }
+    setState(() => _selecionadoId = item.id);
+  }
+
+  void _confirmarSelecao() {
+    final id = _selecionadoId;
+    if (id == null) return;
+    for (final item in _lista) {
+      if (item.id == id) {
+        Navigator.of(context).pop(item);
+        return;
+      }
+    }
+  }
+
+  String _moeda(double valor) {
+    return 'R\$ ${valor.toStringAsFixed(2).replaceAll('.', ',')}';
+  }
+
   @override
   Widget build(BuildContext context) {
     final isServico = widget.tipo == 'servico';
-    final maxH = MediaQuery.sizeOf(context).height * 0.55;
+    final tela = MediaQuery.sizeOf(context);
+    final maxH = tela.height * 0.62;
+    final largura = tela.width - 16;
+    final selecionado = _selecionadoId != null;
 
     return AlertDialog(
-      title: Text(widget.titulo),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 20),
+      constraints: BoxConstraints(minWidth: largura, maxWidth: largura),
+      titlePadding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      contentPadding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(widget.titulo),
+          const SizedBox(height: 2),
+          Text(
+            isServico
+                ? 'Pesquise por nome ou código'
+                : 'Pesquise por nome, código, EAN, IMEI ou série',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: AppTheme.muted,
+            ),
+          ),
+        ],
+      ),
       content: SizedBox(
-        width: double.maxFinite,
-        height: maxH.clamp(240.0, 420.0),
+        width: largura,
+        height: maxH.clamp(280.0, 480.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             TextField(
               controller: _busca,
               autofocus: true,
               decoration: InputDecoration(
-                labelText: 'Buscar no ERP',
                 hintText: isServico
-                    ? 'Código ou descrição'
-                    : 'Código, código de barras ou descrição',
+                    ? 'Digite nome ou código'
+                    : 'Digite nome, código, EAN, IMEI ou série',
                 prefixIcon: const Icon(Icons.search),
+                suffixIconConstraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 suffixIcon: _buscando
                     ? const Padding(
                         padding: EdgeInsets.all(12),
@@ -1439,7 +1518,13 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                       )
-                    : null,
+                    : (!isServico
+                        ? IconButton(
+                            tooltip: 'Escanear código de barras',
+                            onPressed: _escanear,
+                            icon: const Icon(Icons.qr_code_scanner),
+                          )
+                        : null),
               ),
               onChanged: _onChanged,
             ),
@@ -1459,44 +1544,138 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
                         _erro != null
                             ? ''
                             : (isServico
-                                ? 'Nenhum serviço cadastrado no ERP.'
-                                : 'Digite código, barras ou descrição.'),
+                                ? 'Nenhum serviço para mostrar.'
+                                : 'Digite para pesquisar a peça.'),
                         textAlign: TextAlign.center,
                         style: const TextStyle(color: AppTheme.muted),
                       ),
                     )
                   : ListView.separated(
                       itemCount: _lista.length,
-                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
                       itemBuilder: (context, index) {
                         final p = _lista[index];
-                        return ListTile(
-                          dense: true,
-                          title: Text(
-                            p.descricao,
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          subtitle: Text(
-                            [
-                              if (p.codigo.isNotEmpty) 'Cód. ${p.codigo}',
-                              if (p.unidade.isNotEmpty) p.unidade,
-                              'R\$ ${p.preco.toStringAsFixed(2).replaceAll('.', ',')}',
-                            ].join(' • '),
-                          ),
-                          onTap: () => Navigator.of(context).pop(p),
+                        return _ItemBusca(
+                          item: p,
+                          preco: _moeda(p.preco),
+                          selecionado: p.id == _selecionadoId,
+                          onTap: () => _escolher(p),
                         );
                       },
                     ),
             ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancelar'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: selecionado ? _confirmarSelecao : null,
+                    child: const Text('Selecionar'),
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancelar'),
+    );
+  }
+}
+
+class _ItemBusca extends StatelessWidget {
+  const _ItemBusca({
+    required this.item,
+    required this.preco,
+    required this.selecionado,
+    required this.onTap,
+  });
+
+  final ProdutoResumo item;
+  final String preco;
+  final bool selecionado;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final extras = <String>[
+      if (item.codigoBarras.isNotEmpty) 'EAN: ${item.codigoBarras}',
+      if (item.codigoBarrasCaixa.isNotEmpty) 'Cx: ${item.codigoBarrasCaixa}',
+      if (item.imei.isNotEmpty) 'IMEI: ${item.imei}',
+      if (item.numeroSerie.isNotEmpty) 'Série: ${item.numeroSerie}',
+    ];
+    final secundario = [
+      if (item.codigo.isNotEmpty) 'Cód. ${item.codigo}',
+      if (item.unidade.isNotEmpty) item.unidade,
+    ].join(' · ');
+
+    return Material(
+      color: selecionado ? const Color(0xFFE8F1FB) : Colors.white,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: selecionado ? AppTheme.primaryBlue : AppTheme.border,
+              width: selecionado ? 1.6 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      item.descricao,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: AppTheme.text,
+                        height: 1.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    preco,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.primaryBlue,
+                    ),
+                  ),
+                ],
+              ),
+              if (secundario.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(
+                  secundario,
+                  style: const TextStyle(fontSize: 12, color: AppTheme.muted),
+                ),
+              ],
+              if (extras.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(
+                  extras.join(' · '),
+                  style: const TextStyle(fontSize: 12, color: AppTheme.text),
+                ),
+              ],
+            ],
+          ),
         ),
-      ],
+      ),
     );
   }
 }
@@ -1511,7 +1690,7 @@ class _Bloco extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1520,10 +1699,10 @@ class _Bloco extends StatelessWidget {
               style: const TextStyle(
                 color: AppTheme.primaryBlue,
                 fontWeight: FontWeight.w800,
-                fontSize: 14,
+                fontSize: 13,
               ),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 6),
             child,
           ],
         ),
@@ -1540,24 +1719,30 @@ class _Campo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            color: AppTheme.muted,
+        SizedBox(
+          width: 128,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: AppTheme.muted,
+              height: 1.2,
+            ),
           ),
         ),
-        const SizedBox(height: 2),
-        Text(
-          valor,
-          style: const TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
-            color: AppTheme.text,
+        Expanded(
+          child: Text(
+            valor,
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: AppTheme.text,
+              height: 1.2,
+            ),
           ),
         ),
       ],
@@ -1572,6 +1757,7 @@ class _CampoComAcao extends StatelessWidget {
     required this.icone,
     required this.acaoLabel,
     required this.onPressed,
+    this.corAcao = AppTheme.primaryBlue,
   });
 
   final String label;
@@ -1579,6 +1765,7 @@ class _CampoComAcao extends StatelessWidget {
   final IconData icone;
   final String acaoLabel;
   final VoidCallback onPressed;
+  final Color corAcao;
 
   @override
   Widget build(BuildContext context) {
@@ -1586,13 +1773,13 @@ class _CampoComAcao extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Expanded(child: _Campo(label: label, valor: valor)),
-        const SizedBox(width: 8),
+        const SizedBox(width: 4),
         TextButton.icon(
           onPressed: onPressed,
           icon: Icon(icone, size: 18),
           label: Text(acaoLabel),
           style: TextButton.styleFrom(
-            foregroundColor: AppTheme.primaryBlue,
+            foregroundColor: corAcao,
             padding: const EdgeInsets.symmetric(horizontal: 8),
             visualDensity: VisualDensity.compact,
           ),
@@ -1640,7 +1827,7 @@ class _QuantidadePecaDialogState extends State<_QuantidadePecaDialog> {
         onSubmitted: (_) => _confirmar(),
       ),
       actions: [
-        TextButton(
+        OutlinedButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancelar'),
         ),
@@ -1749,7 +1936,7 @@ class _LancamentoServicoDialogState extends State<_LancamentoServicoDialog> {
         ],
       ),
       actions: [
-        TextButton(
+        OutlinedButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancelar'),
         ),

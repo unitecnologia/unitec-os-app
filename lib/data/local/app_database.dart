@@ -20,7 +20,7 @@ class AppDatabase {
     final path = p.join(dir.path, 'unitec_os.db');
     _db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE ordens (
@@ -60,14 +60,30 @@ class AppDatabase {
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
-          await db.execute('ALTER TABLE ordens ADD COLUMN servicos_json TEXT');
+          await _ensureColumn(db, 'ordens', 'servicos_json', 'TEXT');
         }
         if (oldVersion < 3) {
-          await db.execute('ALTER TABLE ordens ADD COLUMN numero_offline TEXT');
+          await _ensureColumn(db, 'ordens', 'numero_offline', 'TEXT');
+        }
+        if (oldVersion < 4) {
+          await _ensureColumn(db, 'ordens', 'servico_realizado', 'TEXT');
         }
       },
     );
     return _db!;
+  }
+
+  /// Evita falha se a coluna já existir (upgrade repetido / schema misto).
+  Future<void> _ensureColumn(
+    Database db,
+    String table,
+    String column,
+    String type,
+  ) async {
+    final info = await db.rawQuery('PRAGMA table_info($table)');
+    final exists = info.any((row) => '${row['name']}' == column);
+    if (exists) return;
+    await db.execute('ALTER TABLE $table ADD COLUMN $column $type');
   }
 
   String newLocalUuid() => _uuid.v4();
@@ -262,6 +278,108 @@ class AppDatabase {
       row,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  /// Atualiza só o relato do técnico. Não regrava peças, serviços nem o restante da OS.
+  Future<OrdemServico> gravarServicoRealizado(OrdemServico os, String texto) async {
+    final database = await db;
+    var localUuid = os.localUuid;
+    if (localUuid == null || localUuid.isEmpty) {
+      if (os.id != null) {
+        final porServidor = await database.query(
+          'ordens',
+          columns: ['local_uuid'],
+          where: 'server_id = ?',
+          whereArgs: [os.id],
+          limit: 1,
+        );
+        if (porServidor.isNotEmpty) {
+          localUuid = '${porServidor.first['local_uuid']}';
+        }
+      }
+      localUuid ??= newLocalUuid();
+    }
+
+    final existente = await database.query(
+      'ordens',
+      where: 'local_uuid = ?',
+      whereArgs: [localUuid],
+      limit: 1,
+    );
+    final agora = DateTime.now().toIso8601String();
+    if (existente.isEmpty) {
+      await database.insert(
+        'ordens',
+        _toRow(os.copyWith(
+          localUuid: localUuid,
+          servicoRealizado: texto,
+          dirty: true,
+          pendingSync: true,
+        )),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    } else {
+      await database.update(
+        'ordens',
+        {
+          'servico_realizado': texto,
+          'dirty': 1,
+          'pending_sync': 1,
+          'updated_at': agora,
+        },
+        where: 'local_uuid = ?',
+        whereArgs: [localUuid],
+      );
+    }
+
+    await _mesclarServicoRealizadoNaFila(localUuid, texto);
+    return (await getByKey('l:$localUuid')) ??
+        os.copyWith(
+          localUuid: localUuid,
+          servicoRealizado: texto,
+          dirty: true,
+          pendingSync: true,
+        );
+  }
+
+  Future<void> _mesclarServicoRealizadoNaFila(
+    String localUuid,
+    String texto,
+  ) async {
+    final database = await db;
+    final itens = await database.query(
+      'sync_queue',
+      where: 'local_uuid = ? AND tipo IN (?, ?)',
+      whereArgs: [localUuid, 'create', 'update'],
+    );
+
+    var temUpdate = false;
+    for (final item in itens) {
+      if ('${item['tipo']}' == 'update') temUpdate = true;
+      final raw = jsonDecode('${item['payload_json']}');
+      if (raw is! Map) continue;
+      raw['servico_realizado'] = texto;
+      await database.update(
+        'sync_queue',
+        {'payload_json': jsonEncode(raw)},
+        where: 'id = ?',
+        whereArgs: [item['id']],
+      );
+    }
+
+    if (temUpdate) return;
+
+    // Só o relato. Peças e serviços ficam no payload que o atendimento já enfileirou.
+    await database.insert('sync_queue', {
+      'tipo': 'update',
+      'local_uuid': localUuid,
+      'payload_json': jsonEncode({
+        'local_uuid': localUuid,
+        'servico_realizado': texto,
+      }),
+      'created_at': DateTime.now().toIso8601String(),
+      'attempts': 0,
+    });
   }
 
   Future<int> pendingCount() async {

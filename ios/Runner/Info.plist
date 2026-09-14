@@ -5,9 +5,13 @@
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>O Unitec OS precisa da câmera para fotografar o atendimento da ordem de serviço.</string>
+	<string>O Unitec OS precisa da câmera para fotografar o atendimento e ler o código de barras da peça.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>O Unitec OS precisa acessar suas fotos para anexá-las à ordem de serviço.</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>whatsapp</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

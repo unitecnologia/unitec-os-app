@@ -389,8 +389,11 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                         )
                       else
                         ..._lista.map((os) {
+                          final detalhe = os.equipamento.trim().isNotEmpty
+                              ? os.equipamento.trim()
+                              : os.servico.trim();
                           return Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.only(bottom: 6),
                             child: Card(
                               child: InkWell(
                                 borderRadius: BorderRadius.circular(10),
@@ -402,10 +405,7 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                                   if (mounted) _carregar(tentarSync: false);
                                 },
                                 child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 12,
-                                  ),
+                                  padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
                                   child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
@@ -415,72 +415,71 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                                             'OS ${os.numeroExibicao}',
                                             style: const TextStyle(
                                               fontWeight: FontWeight.w800,
-                                              fontSize: 15,
+                                              fontSize: 13,
                                               color: AppTheme.text,
                                             ),
                                           ),
                                           if (os.pendingSync) ...[
-                                            const SizedBox(width: 6),
+                                            const SizedBox(width: 4),
                                             const Icon(
                                               Icons.cloud_upload_outlined,
-                                              size: 16,
+                                              size: 14,
                                               color: Color(0xFFB45309),
                                             ),
                                           ],
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 6,
+                                              vertical: 1,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: _corStatus(os.status)
+                                                  .withValues(alpha: 0.12),
+                                              borderRadius: BorderRadius.circular(4),
+                                            ),
+                                            child: Text(
+                                              os.status,
+                                              style: TextStyle(
+                                                color: _corStatus(os.status),
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 10,
+                                              ),
+                                            ),
+                                          ),
                                           const Spacer(),
                                           Text(
-                                            os.dataHora,
+                                            _horaLista(os.dataHora),
                                             style: const TextStyle(
-                                              fontSize: 12,
+                                              fontSize: 11,
                                               fontWeight: FontWeight.w600,
                                               color: AppTheme.muted,
                                             ),
                                           ),
                                         ],
                                       ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        os.cliente,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          fontSize: 14,
-                                        ),
-                                      ),
                                       const SizedBox(height: 2),
                                       Text(
-                                        os.equipamento.isNotEmpty
-                                            ? os.equipamento
-                                            : os.servico,
+                                        os.cliente,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: const TextStyle(
-                                          color: AppTheme.muted,
+                                          fontWeight: FontWeight.w700,
                                           fontSize: 13,
                                         ),
                                       ),
-                                      const SizedBox(height: 8),
-                                      Align(
-                                        alignment: Alignment.centerLeft,
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 3,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: _corStatus(os.status)
-                                                .withValues(alpha: 0.12),
-                                            borderRadius: BorderRadius.circular(6),
-                                          ),
-                                          child: Text(
-                                            os.status,
-                                            style: TextStyle(
-                                              color: _corStatus(os.status),
-                                              fontWeight: FontWeight.w700,
-                                              fontSize: 11,
-                                            ),
+                                      if (detalhe.isNotEmpty) ...[
+                                        const SizedBox(height: 1),
+                                        Text(
+                                          detalhe,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            color: AppTheme.muted,
+                                            fontSize: 12,
                                           ),
                                         ),
-                                      ),
+                                      ],
                                     ],
                                   ),
                                 ),
@@ -493,6 +492,13 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                 ),
     );
   }
+}
+
+/// O dia já está no filtro. Na lista mostra só o horário.
+String _horaLista(String dataHora) {
+  final partes = dataHora.trim().split(RegExp(r'\s+'));
+  if (partes.length >= 2 && partes.last.contains(':')) return partes.last;
+  return dataHora;
 }
 
 /// Compara `dataHora` (`dd/MM/yyyy HH:mm` ou `dd/MM HH:mm`) com o dia filtrado.

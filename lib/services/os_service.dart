@@ -63,6 +63,10 @@ class ProdutoResumo {
     required this.id,
     required this.descricao,
     this.codigo = '',
+    this.codigoBarras = '',
+    this.codigoBarrasCaixa = '',
+    this.imei = '',
+    this.numeroSerie = '',
     this.unidade = 'UN',
     this.preco = 0,
   });
@@ -70,14 +74,32 @@ class ProdutoResumo {
   final int id;
   final String descricao;
   final String codigo;
+  final String codigoBarras;
+  final String codigoBarrasCaixa;
+  final String imei;
+  final String numeroSerie;
   final String unidade;
   final double preco;
+
+  bool correspondeCodigo(String codigo) {
+    final alvo = codigo.trim();
+    if (alvo.isEmpty) return false;
+    return this.codigo.trim() == alvo ||
+        codigoBarras.trim() == alvo ||
+        codigoBarrasCaixa.trim() == alvo ||
+        imei.trim() == alvo ||
+        numeroSerie.trim() == alvo;
+  }
 
   factory ProdutoResumo.fromJson(Map<String, dynamic> json) {
     return ProdutoResumo(
       id: json['id'] is int ? json['id'] as int : int.parse('${json['id']}'),
       descricao: '${json['descricao'] ?? ''}',
       codigo: '${json['codigo'] ?? ''}',
+      codigoBarras: '${json['codigo_barras'] ?? ''}',
+      codigoBarrasCaixa: '${json['codigo_barras_caixa'] ?? ''}',
+      imei: '${json['imei'] ?? ''}',
+      numeroSerie: '${json['numero_serie'] ?? ''}',
       unidade: '${json['unidade'] ?? 'UN'}',
       preco: json['preco'] is num
           ? (json['preco'] as num).toDouble()
@@ -466,6 +488,14 @@ class OsService {
       'created_at': DateTime.now().toIso8601String(),
       'attempts': 0,
     });
+  }
+
+  /// Grava o relato no SQLite e na mesma fila pendente do atendimento.
+  /// Não chama a API aqui — o sync já envia `servico_realizado`.
+  Future<OrdemServico> gravarServicoPrestadoLocal(OrdemServico os, String texto) async {
+    final gravada = await _db.gravarServicoRealizado(os, texto.trim());
+    await SyncService.instance.refreshPending();
+    return gravada;
   }
 
   Future<OrdemServico> atualizarAtendimento({
