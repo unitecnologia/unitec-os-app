@@ -145,6 +145,8 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
         return const Color(0xFFB45309);
       case 'Em andamento':
         return AppTheme.primaryBlue;
+      case 'Em faturamento':
+        return const Color(0xFF9A3412);
       case 'Finalizada':
         return const Color(0xFF15803D);
       default:
@@ -292,6 +294,20 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                               onTap: () => setState(() {
                                 _filtro =
                                     _filtro == 'Em andamento' ? 'Todas' : 'Em andamento';
+                              }),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _ResumoCard(
+                              titulo: 'Faturamento',
+                              valor: _contar('Em faturamento').toString(),
+                              cor: const Color(0xFF9A3412),
+                              ativo: _filtro == 'Em faturamento',
+                              onTap: () => setState(() {
+                                _filtro = _filtro == 'Em faturamento'
+                                    ? 'Todas'
+                                    : 'Em faturamento';
                               }),
                             ),
                           ),

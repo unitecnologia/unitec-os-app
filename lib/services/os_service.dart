@@ -394,7 +394,7 @@ class OsService {
   }) async {
     var nextStatus = os.status;
     if (finalizar) {
-      nextStatus = 'Finalizada';
+      nextStatus = 'Em faturamento';
     } else if (status != null) {
       nextStatus = status;
     } else if (iniciar && os.status == 'Pendente') {

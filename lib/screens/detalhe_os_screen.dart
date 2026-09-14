@@ -123,6 +123,8 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         return const Color(0xFFB45309);
       case 'Em andamento':
         return AppTheme.primaryBlue;
+      case 'Em faturamento':
+        return const Color(0xFF9A3412);
       case 'Finalizada':
         return const Color(0xFF15803D);
       default:
@@ -195,8 +197,8 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
       });
       if (finalizar) {
         _toast(updated.pendingSync
-            ? 'OS finalizada (aguardando sync).'
-            : 'OS finalizada.');
+            ? 'OS enviada para faturamento (aguardando sync).'
+            : 'OS enviada para faturamento.');
       } else {
         _toast(updated.pendingSync
             ? 'Salvo localmente (aguardando sync).'
@@ -209,7 +211,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
       _toast(e.message);
       if (mounted) setState(() => _salvando = false);
     } catch (_) {
-      _toast(finalizar ? 'Falha ao finalizar a OS.' : 'Falha ao salvar.');
+      _toast(finalizar ? 'Falha ao enviar a OS para faturamento.' : 'Falha ao salvar.');
       if (mounted) setState(() => _salvando = false);
     }
   }
@@ -221,20 +223,22 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         _status == 'Finalizada' ||
         (_inicioAtendimento != null && _inicioAtendimento!.trim().isNotEmpty);
     if (!iniciada || _status == 'Pendente') {
-      _toast('Inicie o atendimento antes de finalizar a OS.');
+      _toast('Inicie o atendimento antes de enviar a OS para faturamento.');
       return;
     }
 
     if (_servicos.isEmpty) {
-      _toast('Informe pelo menos um serviço realizado antes de finalizar.');
+      _toast('Informe pelo menos um serviço realizado antes de enviar para faturamento.');
       return;
     }
 
     final confirmar = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Finalizar OS'),
-        content: const Text('Deseja finalizar esta OS?'),
+        title: const Text('Enviar para faturamento'),
+        content: const Text(
+          'A OS vai aberta para o ERP. No app ela fica em faturamento até o faturamento ser concluído.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -242,7 +246,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Finalizar'),
+            child: const Text('Enviar'),
           ),
         ],
       ),
@@ -291,15 +295,56 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
   }
 
   Future<void> _adicionarServicoRealizado() async {
-    final descricao = await showDialog<String>(
+    final selecionado = await showDialog<ProdutoResumo>(
       context: context,
-      builder: (ctx) => const _DescricaoServicoDialog(),
+      builder: (ctx) => const _BuscarCatalogoDialog(
+        titulo: 'Adicionar serviço',
+        tipo: 'servico',
+      ),
     );
-    if (descricao == null || !mounted) return;
-    final texto = descricao.trim();
-    if (texto.isEmpty) return;
+    if (selecionado == null || !mounted) return;
+
+    final lancamento = await showDialog<_LancamentoServico>(
+      context: context,
+      builder: (ctx) => _LancamentoServicoDialog(
+        descricao: selecionado.descricao,
+        precoInicial: selecionado.preco,
+      ),
+    );
+    if (lancamento == null || !mounted) return;
+
     setState(() {
-      _servicos.add(PecaOs(descricao: texto.toUpperCase()));
+      _servicos.add(
+        PecaOs(
+          produtoId: selecionado.id,
+          codigo: selecionado.codigo,
+          descricao: selecionado.descricao,
+          preco: lancamento.preco,
+          qtd: lancamento.qtd,
+        ),
+      );
+    });
+  }
+
+  Future<void> _alterarValorServico(int index) async {
+    if (index < 0 || index >= _servicos.length) return;
+    final item = _servicos[index];
+    final lancamento = await showDialog<_LancamentoServico>(
+      context: context,
+      builder: (ctx) => _LancamentoServicoDialog(
+        descricao: item.descricao,
+        precoInicial: item.preco,
+        qtdInicial: item.qtd,
+        titulo: 'Alterar serviço',
+        confirmarLabel: 'Salvar',
+      ),
+    );
+    if (lancamento == null || !mounted) return;
+    setState(() {
+      _servicos[index] = item.copyWith(
+        preco: lancamento.preco,
+        qtd: lancamento.qtd,
+      );
     });
   }
 
@@ -638,7 +683,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
 
     final os = _os!;
     final corStatus = _corStatus(_status);
-    final finalizada = _status == 'Finalizada';
+    final finalizada = _status == 'Finalizada' || _status == 'Em faturamento';
 
     return Scaffold(
       appBar: AppBar(
@@ -755,9 +800,11 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                           const SizedBox(height: 4),
                         ],
                         Text(
-                          finalizada
+                          _status == 'Finalizada'
                               ? 'Atendimento finalizado.'
-                              : 'Atendimento em andamento.',
+                              : (_status == 'Em faturamento'
+                                  ? 'Aguardando faturamento no ERP.'
+                                  : 'Atendimento em andamento.'),
                           style: const TextStyle(color: AppTheme.muted, fontSize: 13),
                         ),
                       ],
@@ -783,48 +830,170 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                           'Nenhum serviço realizado adicionado.',
                           style: TextStyle(color: AppTheme.muted, fontSize: 13),
                         )
-                      else
-                        ..._servicos.asMap().entries.map((e) {
-                          final item = e.value;
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Padding(
-                                  padding: EdgeInsets.only(top: 2),
-                                  child: Icon(
-                                    Icons.check_circle_outline,
-                                    size: 18,
+                      else ...[
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 6),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                flex: 4,
+                                child: Text(
+                                  'Serviço',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
                                     color: AppTheme.muted,
                                   ),
                                 ),
-                                const SizedBox(width: 8),
+                              ),
+                              SizedBox(
+                                width: 40,
+                                child: Text(
+                                  'Qtd',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 72,
+                                child: Text(
+                                  'Valor',
+                                  textAlign: TextAlign.right,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                width: 64,
+                                child: Text(
+                                  'Total',
+                                  textAlign: TextAlign.right,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w800,
+                                    color: AppTheme.muted,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(width: 36),
+                            ],
+                          ),
+                        ),
+                        ..._servicos.asMap().entries.map((e) {
+                          final item = e.value;
+                          final total = item.preco * item.qtd;
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
                                 Expanded(
+                                  flex: 4,
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      if (item.codigo.isNotEmpty)
+                                        Text(
+                                          item.codigo,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: AppTheme.muted,
+                                          ),
+                                        ),
+                                      Text(
+                                        item.descricao,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 40,
                                   child: Text(
-                                    item.descricao,
+                                    _fmtQtd(item.qtd),
+                                    textAlign: TextAlign.center,
                                     style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 13,
                                     ),
                                   ),
                                 ),
-                                if (!finalizada)
-                                  IconButton(
-                                    tooltip: 'Remover',
-                                    visualDensity: VisualDensity.compact,
-                                    onPressed: _salvando
-                                        ? null
-                                        : () {
-                                            setState(
-                                              () => _servicos.removeAt(e.key),
-                                            );
-                                          },
-                                    icon: const Icon(Icons.close, size: 18),
+                                SizedBox(
+                                  width: 72,
+                                  child: Align(
+                                    alignment: Alignment.centerRight,
+                                    child: finalizada
+                                        ? Text(
+                                            _fmtMoney(item.preco),
+                                            textAlign: TextAlign.right,
+                                            style: const TextStyle(fontSize: 12),
+                                          )
+                                        : InkWell(
+                                            onTap: _salvando
+                                                ? null
+                                                : () => _alterarValorServico(e.key),
+                                            child: Text(
+                                              _fmtMoney(item.preco),
+                                              textAlign: TextAlign.right,
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w700,
+                                                color: AppTheme.primaryBlue,
+                                                decoration: TextDecoration.underline,
+                                              ),
+                                            ),
+                                          ),
                                   ),
+                                ),
+                                SizedBox(
+                                  width: 64,
+                                  child: Text(
+                                    _fmtMoney(total),
+                                    textAlign: TextAlign.right,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 36,
+                                  child: (!finalizada)
+                                      ? IconButton(
+                                          tooltip: 'Remover',
+                                          visualDensity: VisualDensity.compact,
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(
+                                            minWidth: 32,
+                                            minHeight: 32,
+                                          ),
+                                          onPressed: _salvando
+                                              ? null
+                                              : () {
+                                                  setState(
+                                                    () => _servicos.removeAt(e.key),
+                                                  );
+                                                },
+                                          icon: const Icon(Icons.close, size: 18),
+                                        )
+                                      : const SizedBox.shrink(),
+                                ),
                               ],
                             ),
                           );
                         }),
+                      ],
                     ],
                   ),
                 ),
@@ -1177,12 +1346,12 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                   Expanded(
                     child: ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF15803D),
+                        backgroundColor: const Color(0xFF9A3412),
                       ),
                       onPressed: (_salvando || finalizada)
                           ? null
                           : _finalizarOs,
-                      child: const Text('Finalizar OS'),
+                      child: const Text('Enviar faturamento'),
                     ),
                   ),
                 ],
@@ -1308,9 +1477,11 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
               child: _lista.isEmpty && !_buscando
                   ? Center(
                       child: Text(
-                        isServico
-                            ? 'Digite para buscar serviços cadastrados.'
-                            : 'Digite código, barras ou descrição.',
+                        _erro != null
+                            ? ''
+                            : (isServico
+                                ? 'Nenhum serviço cadastrado no ERP.'
+                                : 'Digite código, barras ou descrição.'),
                         textAlign: TextAlign.center,
                         style: const TextStyle(color: AppTheme.muted),
                       ),
@@ -1503,41 +1674,100 @@ class _QuantidadePecaDialogState extends State<_QuantidadePecaDialog> {
   }
 }
 
-class _DescricaoServicoDialog extends StatefulWidget {
-  const _DescricaoServicoDialog();
+class _LancamentoServico {
+  const _LancamentoServico({required this.qtd, required this.preco});
 
-  @override
-  State<_DescricaoServicoDialog> createState() => _DescricaoServicoDialogState();
+  final double qtd;
+  final double preco;
 }
 
-class _DescricaoServicoDialogState extends State<_DescricaoServicoDialog> {
-  final _ctrl = TextEditingController();
+class _LancamentoServicoDialog extends StatefulWidget {
+  const _LancamentoServicoDialog({
+    required this.descricao,
+    required this.precoInicial,
+    this.qtdInicial = 1,
+    this.titulo = 'Serviço',
+    this.confirmarLabel = 'Adicionar',
+  });
+
+  final String descricao;
+  final double precoInicial;
+  final double qtdInicial;
+  final String titulo;
+  final String confirmarLabel;
+
+  @override
+  State<_LancamentoServicoDialog> createState() => _LancamentoServicoDialogState();
+}
+
+class _LancamentoServicoDialogState extends State<_LancamentoServicoDialog> {
+  late final TextEditingController _qtd;
+  late final TextEditingController _valor;
+
+  @override
+  void initState() {
+    super.initState();
+    _qtd = TextEditingController(text: _formatarNumero(widget.qtdInicial, 3));
+    _valor = TextEditingController(text: _formatarNumero(widget.precoInicial, 2));
+  }
 
   @override
   void dispose() {
-    _ctrl.dispose();
+    _qtd.dispose();
+    _valor.dispose();
     super.dispose();
   }
 
+  String _formatarNumero(double valor, int casas) {
+    if (casas == 3 && valor == valor.roundToDouble()) {
+      return '${valor.toInt()}';
+    }
+    return valor.toStringAsFixed(casas).replaceAll('.', ',');
+  }
+
+  double? _lerNumero(String texto) {
+    final raw = texto.trim().replaceAll('.', '').replaceAll(',', '.');
+    if (raw.isEmpty) return null;
+    return double.tryParse(raw);
+  }
+
   void _confirmar() {
-    final texto = _ctrl.text.trim();
-    if (texto.isEmpty) return;
-    Navigator.of(context).pop(texto);
+    final qtd = _lerNumero(_qtd.text);
+    final preco = _lerNumero(_valor.text);
+    if (qtd == null || qtd <= 0 || preco == null || preco < 0) return;
+    Navigator.of(context).pop(_LancamentoServico(qtd: qtd, preco: preco));
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Serviço realizado'),
-      content: TextField(
-        controller: _ctrl,
-        autofocus: true,
-        maxLines: 3,
-        textCapitalization: TextCapitalization.sentences,
-        decoration: const InputDecoration(
-          hintText: 'Descreva o serviço realizado',
-        ),
-        onSubmitted: (_) => _confirmar(),
+      title: Text(widget.titulo),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            widget.descricao,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _qtd,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(labelText: 'Quantidade'),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _valor,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(
+              labelText: 'Valor',
+              prefixText: 'R\$ ',
+            ),
+            onSubmitted: (_) => _confirmar(),
+          ),
+        ],
       ),
       actions: [
         TextButton(
@@ -1546,7 +1776,7 @@ class _DescricaoServicoDialogState extends State<_DescricaoServicoDialog> {
         ),
         ElevatedButton(
           onPressed: _confirmar,
-          child: const Text('Adicionar'),
+          child: Text(widget.confirmarLabel),
         ),
       ],
     );
