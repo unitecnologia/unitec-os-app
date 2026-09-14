@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:unitec_os_app/config/erp_url.dart';
 
 export 'device_identity.dart';
 
@@ -41,18 +42,20 @@ class ApiConfig {
   static String get apiBase => '${erpBaseUrl.replaceAll(RegExp(r'/+$'), '')}/api/v1/unitec-os';
 
   static void setErpBaseUrl(String url) {
-    var u = url.trim().replaceAll(RegExp(r'/+$'), '');
-    if (u.isNotEmpty && !u.startsWith('http://') && !u.startsWith('https://')) {
-      u = 'http://$u';
-    }
+    final u = ErpUrl.normalize(url);
+    if (u.isEmpty) return;
     erpBaseUrl = u;
   }
+
+  static bool get urlEhTunel => ErpUrl.ehNuvemUrl(erpBaseUrl);
 
   static Future<void> loadSavedUrl() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString(_prefsUrlKey);
-    if (saved != null && saved.trim().isNotEmpty) {
-      setErpBaseUrl(saved);
+    if (saved == null || saved.trim().isEmpty) return;
+    setErpBaseUrl(saved);
+    if (erpBaseUrl != saved.trim().replaceAll(RegExp(r'/+$'), '')) {
+      await saveUrl();
     }
   }
 

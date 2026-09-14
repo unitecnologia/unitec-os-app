@@ -66,7 +66,12 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
   }
 
   void _onSyncChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    if (_sync.syncing) {
+      setState(() {});
+      return;
+    }
+    _carregar(tentarSync: false);
   }
 
   Future<void> _carregar({bool tentarSync = false}) async {
@@ -104,7 +109,7 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
   }
 
   Future<void> _sincronizar() async {
-    final result = await _sync.sincronizar();
+    final result = await _sync.tentarSincronizar();
     await _carregar(tentarSync: false);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -158,6 +163,7 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
   Widget build(BuildContext context) {
     final pending = _sync.pending;
     final online = _sync.online;
+    final verificando = _sync.verificando;
 
     return Scaffold(
       appBar: AppBar(
@@ -190,9 +196,13 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
               ),
             ),
           IconButton(
-            tooltip: online ? 'Sincronizar' : 'Offline — sincronizar ao voltar',
-            onPressed: _sync.syncing ? null : _sincronizar,
-            icon: _sync.syncing
+            tooltip: verificando
+                ? 'Verificando se o ERP responde'
+                : online
+                    ? 'Sincronizar'
+                    : 'ERP offline — toque para tentar de novo',
+            onPressed: _sync.syncing || verificando ? null : _sincronizar,
+            icon: _sync.syncing || verificando
                 ? const SizedBox(
                     width: 22,
                     height: 22,
@@ -247,7 +257,7 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                     physics: const AlwaysScrollableScrollPhysics(),
                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
                     children: [
-                      if (!online || pending > 0)
+                      if (!online || verificando || pending > 0)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 10),
                           child: Material(
@@ -259,9 +269,13 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                                 vertical: 10,
                               ),
                               child: Text(
-                                !online
-                                    ? 'Modo offline — alterações serão sincronizadas depois.'
-                                    : '$pending alteração(ões) aguardando sync.',
+                                verificando
+                                    ? 'Verificando se o ERP responde…'
+                                    : !online
+                                        ? (_sync.semRede
+                                            ? 'Sem internet — as OS ficam salvas neste celular.'
+                                            : 'Internet no celular, mas o ERP não respondeu. Trabalho local continua.')
+                                        : '$pending alteração(ões) aguardando sync.',
                                 style: const TextStyle(
                                   fontSize: 13,
                                   fontWeight: FontWeight.w600,
@@ -398,7 +412,7 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                                       Row(
                                         children: [
                                           Text(
-                                            'OS ${os.numero}',
+                                            'OS ${os.numeroExibicao}',
                                             style: const TextStyle(
                                               fontWeight: FontWeight.w800,
                                               fontSize: 15,

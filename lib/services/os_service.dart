@@ -2,10 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:sqflite/sqflite.dart';
+import 'package:unitec_os_app/config/device_identity.dart';
 import 'package:unitec_os_app/data/local/app_database.dart';
 import 'package:unitec_os_app/models/ordem_servico.dart';
 import 'package:unitec_os_app/models/peca_os.dart';
 import 'package:unitec_os_app/services/api_client.dart';
+import 'package:unitec_os_app/services/os_create_vinculo.dart';
 import 'package:unitec_os_app/services/sync_service.dart';
 import 'package:unitec_os_app/session/app_session.dart';
 
@@ -94,7 +96,7 @@ class OsService {
   Future<List<OrdemServico>> listarMinhas({bool tentarSync = true}) async {
     if (tentarSync && AppSession.isLoggedIn) {
       try {
-        await SyncService.instance.sincronizar();
+        await SyncService.instance.tentarSincronizar();
       } catch (_) {
         // Offline / falha → usa cache local.
       }
@@ -105,6 +107,7 @@ class OsService {
   Future<OrdemServico?> obterPorKey(String key) async {
     final local = await _db.getByKey(key);
     if (local != null) return local;
+    if (!SyncService.instance.podeTentarErp) return null;
 
     if (key.startsWith('s:')) {
       final id = int.tryParse(key.substring(2));
@@ -138,6 +141,7 @@ class OsService {
 
   Future<List<ClienteResumo>> buscarClientes(String termo) async {
     final q = termo.trim();
+    if (!SyncService.instance.podeTentarErp) return [];
     final path = q.isEmpty
         ? '/clientes'
         : '/clientes?q=${Uri.encodeQueryComponent(q)}';
@@ -163,6 +167,7 @@ class OsService {
     if (q.isNotEmpty) {
       params.add('q=${Uri.encodeQueryComponent(q)}');
     }
+    if (!SyncService.instance.podeTentarErp) return [];
     final path = '/produtos?${params.join('&')}';
     try {
       final json = await _client.getJson(path);
@@ -212,7 +217,13 @@ class OsService {
       cep: cep,
     );
 
-    final body = <String, dynamic>{
+    final localUuid = _db.newLocalUuid();
+    await DeviceIdentity.ensureReady();
+
+    final body = OsCreateVinculo.corpo(
+      localUuid: localUuid,
+      deviceUuid: DeviceIdentity.uuid,
+      campos: {
       'cliente_id': ?clienteId,
       'cliente': cliente.trim(),
       'nome_fantasia': nomeFantasia.trim(),
@@ -227,9 +238,13 @@ class OsService {
       'uf': uf.trim().toUpperCase(),
       'equipamento': equipamento.trim(),
       'problema': problema.trim(),
-    };
+      },
+    );
 
     try {
+      if (!SyncService.instance.podeTentarErp) {
+        throw ApiException('Sem conexão com o ERP.');
+      }
       final json = await _client.postJson(
         '/ordens',
         body: body,
@@ -239,9 +254,22 @@ class OsService {
       if (dataMap is! Map) {
         throw ApiException('Resposta inválida ao criar OS.');
       }
-      final os = OrdemServico.fromJson(Map<String, dynamic>.from(dataMap));
-      await _db.upsertFromServer(os);
-      final saved = await _db.getByKey('s:${os.id}') ?? os;
+      final vinculo = OsCreateVinculo.lerResposta(json);
+      if (vinculo == null) {
+        throw ApiException('Resposta inválida ao criar OS.');
+      }
+      final os = OrdemServico.fromJson(Map<String, dynamic>.from(dataMap)).copyWith(
+        localUuid: localUuid,
+        id: vinculo.serverId,
+        numero: vinculo.numeroOficial,
+      );
+      await _db.vincularServidor(
+        localUuid: localUuid,
+        serverId: vinculo.serverId,
+        numeroOficial: vinculo.numeroOficial,
+        fallback: os,
+      );
+      final saved = await _db.getByKey('l:$localUuid') ?? os;
       return (
         os: saved,
         clienteCriado: json['cliente_criado'] == true,
@@ -251,11 +279,11 @@ class OsService {
       if (e.statusCode == 401) rethrow;
     } catch (_) {}
 
-    final localUuid = _db.newLocalUuid();
     final short = localUuid.substring(0, 8).toUpperCase();
     final draft = OrdemServico(
       localUuid: localUuid,
       numero: 'OFF-$short',
+      numeroOffline: 'OFF-$short',
       cliente: cliente.trim().toUpperCase(),
       telefone: telefone.trim(),
       endereco: enderecoExibicao,
@@ -307,6 +335,9 @@ class OsService {
     if (digits.length != 14) {
       throw ApiException('Informe um CNPJ completo com 14 dígitos.');
     }
+    if (!SyncService.instance.podeTentarErp) {
+      throw ApiException('Sem conexão com o ERP.');
+    }
     final json = await _client.getJson('/cnpj/$digits', auth: true);
     final data = json['data'];
     if (data is! Map) {
@@ -320,6 +351,9 @@ class OsService {
     if (digits.length != 8) {
       throw ApiException('Informe um CEP completo com 8 dígitos.');
     }
+    if (!SyncService.instance.podeTentarErp) {
+      throw ApiException('Sem conexão com o ERP.');
+    }
     final json = await _client.getJson('/cep/$digits', auth: true);
     final data = json['data'];
     if (data is! Map) {
@@ -328,10 +362,58 @@ class OsService {
     return data.map((k, v) => MapEntry('$k', v?.toString() ?? ''));
   }
 
+  Future<void> enfileirarMidia({
+    required String localUuid,
+    int? serverId,
+    required String tipo,
+    required String path,
+  }) async {
+    final database = await _db.db;
+    final rows = await database.query(
+      'sync_queue',
+      where: 'local_uuid = ? AND tipo = ?',
+      whereArgs: [localUuid, tipo],
+    );
+    for (final row in rows) {
+      final raw = jsonDecode('${row['payload_json']}');
+      if (raw is Map && raw['path'] == path) return;
+    }
+
+    await database.insert('sync_queue', {
+      'tipo': tipo,
+      'local_uuid': localUuid,
+      'payload_json': jsonEncode({
+        'path': path,
+        'server_id': serverId,
+      }),
+      'created_at': DateTime.now().toIso8601String(),
+      'attempts': 0,
+    });
+    await SyncService.instance.refreshPending();
+  }
+
+  Future<void> removerMidiaFila(String path) async {
+    final database = await _db.db;
+    final rows = await database.query(
+      'sync_queue',
+      where: "tipo IN ('foto', 'assinatura')",
+    );
+    for (final row in rows) {
+      final raw = jsonDecode('${row['payload_json']}');
+      if (raw is Map && raw['path'] == path) {
+        await database.delete('sync_queue', where: 'id = ?', whereArgs: [row['id']]);
+      }
+    }
+    await SyncService.instance.refreshPending();
+  }
+
   Future<void> enviarFotoOs({
     required int osId,
     required File arquivo,
   }) async {
+    if (!SyncService.instance.podeTentarErp) {
+      throw ApiException('Sem conexão com o ERP.');
+    }
     final bytes = await arquivo.readAsBytes();
     final nome = arquivo.uri.pathSegments.isNotEmpty
         ? arquivo.uri.pathSegments.last
@@ -349,6 +431,9 @@ class OsService {
     required int osId,
     required List<int> pngBytes,
   }) async {
+    if (!SyncService.instance.podeTentarErp) {
+      throw ApiException('Sem conexão com o ERP.');
+    }
     await _client.postMultipart(
       '/ordens/$osId/assinatura',
       fieldName: 'assinatura',
@@ -371,6 +456,8 @@ class OsService {
     final payload = {
       ...os.toJson(),
       ...body,
+      'app_local_uuid': os.localUuid,
+      'device_uuid': body['device_uuid'],
     };
     await database.insert('sync_queue', {
       'tipo': 'create',
@@ -424,42 +511,77 @@ class OsService {
       next = next.copyWith(tecnico: AppSession.usuario);
     }
 
-    if (next.id != null) {
-      try {
-        final json = await _client.putJson(
-          '/ordens/${next.id}',
-          body: {
-            'status': next.status,
-            // No iniciar, o servidor grava/preserva hora_inicio (não sobrescreve).
-            if (!iniciar && next.horaInicio != null) 'hora_inicio': next.horaInicio,
-            if (servicoRealizado != null) 'servico_realizado': next.servicoRealizado,
-            if (observacoes != null) 'observacoes': next.observacao,
-            if (pecas != null) 'pecas': next.pecas.map((e) => e.toJson()).toList(),
-            if (servicos != null)
-              'servicos': next.servicos.map((e) => e.toJson()).toList(),
-            if (iniciar) 'iniciar_atendimento': true,
-            if (finalizar) 'finalizar': true,
-          },
-        );
-        final data = json['data'];
-        if (data is Map) {
-          final serverOs = OrdemServico.fromJson(Map<String, dynamic>.from(data));
-          await _db.upsertFromServer(serverOs);
-          return (await _db.getByKey('s:${serverOs.id}')) ?? serverOs;
-        }
-      } on ApiException {
-        rethrow;
-      } catch (_) {}
+    final gravado = await _persistirAtendimentoLocal(
+      next,
+      iniciar: iniciar,
+      finalizar: finalizar,
+    );
+    next = gravado.os;
+
+    if (next.id == null || !SyncService.instance.podeTentarErp) {
+      return next;
     }
 
-    final localUuid = next.localUuid ?? _db.newLocalUuid();
-    next = next.copyWith(localUuid: localUuid);
+    try {
+      final json = await _client.putJson(
+        '/ordens/${next.id}',
+        body: _corpoAtendimento(
+          next,
+          iniciar: gravado.iniciar,
+          finalizar: gravado.finalizar,
+        ),
+      );
+      final data = json['data'];
+      if (data is Map) {
+        final serverOs = OrdemServico.fromJson(Map<String, dynamic>.from(data));
+        await _db.markSynced(next.localUuid!, serverOs);
+        await _removerFilaUpdate(next.localUuid!);
+        SyncService.instance.marcarErpAlcancavel();
+        await SyncService.instance.refreshPending();
+        return (await _db.getByKey('s:${serverOs.id}')) ??
+            serverOs.copyWith(localUuid: next.localUuid, pendingSync: false, dirty: false);
+      }
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      if (e.isOffline) SyncService.instance.marcarErpInalcancavel();
+      if (!e.isOffline) rethrow;
+    } catch (_) {
+      SyncService.instance.marcarErpInalcancavel();
+    }
 
-    final payload = next.toJson()
-      ..['iniciar_atendimento'] = iniciar
-      ..['finalizar'] = finalizar;
+    return next;
+  }
 
+  Map<String, dynamic> _corpoAtendimento(
+    OrdemServico os, {
+    required bool iniciar,
+    required bool finalizar,
+  }) {
+    return {
+      'status': os.status,
+      if (!iniciar && os.horaInicio != null) 'hora_inicio': os.horaInicio,
+      'servico_realizado': os.servicoRealizado,
+      'observacoes': os.observacao,
+      'pecas': os.pecas.map((e) => e.toJson()).toList(),
+      'servicos': os.servicos.map((e) => e.toJson()).toList(),
+      if (iniciar) 'iniciar_atendimento': true,
+      if (finalizar) 'finalizar': true,
+    };
+  }
+
+  Future<({OrdemServico os, bool iniciar, bool finalizar})> _persistirAtendimentoLocal(
+    OrdemServico os, {
+    required bool iniciar,
+    required bool finalizar,
+  }) async {
+    var localUuid = os.localUuid;
+    if ((localUuid == null || localUuid.isEmpty) && os.id != null) {
+      localUuid = (await _db.getByKey('s:${os.id}'))?.localUuid;
+    }
+    localUuid ??= _db.newLocalUuid();
+    final next = os.copyWith(localUuid: localUuid, dirty: true, pendingSync: true);
     final database = await _db.db;
+
     await database.insert(
       'ordens',
       {
@@ -485,6 +607,29 @@ class OsService {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+
+    var iniciarFila = iniciar;
+    var finalizarFila = finalizar;
+    final anteriores = await database.query(
+      'sync_queue',
+      where: 'local_uuid = ? AND tipo = ?',
+      whereArgs: [localUuid, 'update'],
+    );
+    for (final row in anteriores) {
+      final raw = jsonDecode('${row['payload_json']}');
+      if (raw is! Map) continue;
+      if (raw['iniciar_atendimento'] == true) iniciarFila = true;
+      if (raw['finalizar'] == true) finalizarFila = true;
+    }
+    await database.delete(
+      'sync_queue',
+      where: 'local_uuid = ? AND tipo = ?',
+      whereArgs: [localUuid, 'update'],
+    );
+
+    final payload = next.toJson()
+      ..['iniciar_atendimento'] = iniciarFila
+      ..['finalizar'] = finalizarFila;
     await database.insert('sync_queue', {
       'tipo': 'update',
       'local_uuid': localUuid,
@@ -494,9 +639,14 @@ class OsService {
     });
 
     await SyncService.instance.refreshPending();
-    // ignore: discarded_futures
-    SyncService.instance.sincronizar(forcePull: false);
+    return (os: next, iniciar: iniciarFila, finalizar: finalizarFila);
+  }
 
-    return next;
+  Future<void> _removerFilaUpdate(String localUuid) async {
+    await (await _db.db).delete(
+      'sync_queue',
+      where: 'local_uuid = ? AND tipo = ?',
+      whereArgs: [localUuid, 'update'],
+    );
   }
 }

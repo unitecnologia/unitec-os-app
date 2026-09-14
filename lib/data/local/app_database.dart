@@ -20,13 +20,14 @@ class AppDatabase {
     final path = p.join(dir.path, 'unitec_os.db');
     _db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE ordens (
             local_uuid TEXT PRIMARY KEY,
             server_id INTEGER,
             numero TEXT NOT NULL,
+            numero_offline TEXT,
             cliente TEXT NOT NULL,
             telefone TEXT,
             endereco TEXT,
@@ -60,6 +61,9 @@ class AppDatabase {
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
           await db.execute('ALTER TABLE ordens ADD COLUMN servicos_json TEXT');
+        }
+        if (oldVersion < 3) {
+          await db.execute('ALTER TABLE ordens ADD COLUMN numero_offline TEXT');
         }
       },
     );
@@ -124,14 +128,24 @@ class AppDatabase {
       return;
     }
 
+    if (existing.isEmpty && (os.localUuid == null || os.localUuid!.isEmpty)) {
+      final criacaoPendente = await database.query(
+        'sync_queue',
+        columns: ['id'],
+        where: "tipo = 'create'",
+        limit: 1,
+      );
+      if (criacaoPendente.isNotEmpty) {
+        return;
+      }
+    }
+
     final localUuid = existing.isNotEmpty
         ? '${existing.first['local_uuid']}'
         : (os.localUuid ?? newLocalUuid());
 
-    await database.insert(
-      'ordens',
-      _toRow(os.copyWith(localUuid: localUuid, dirty: false, pendingSync: false)),
-      conflictAlgorithm: ConflictAlgorithm.replace,
+    await _substituirLinha(
+      os.copyWith(localUuid: localUuid, dirty: false, pendingSync: false),
     );
   }
 
@@ -166,17 +180,87 @@ class AppDatabase {
     await (await db).delete('sync_queue', where: 'id = ?', whereArgs: [id]);
   }
 
-  Future<void> markSynced(String localUuid, OrdemServico serverOs) async {
+  /// Grava só o id e o número oficiais. Não troca o `local_uuid` nem apaga atendimento local.
+  Future<void> vincularServidor({
+    required String localUuid,
+    required int serverId,
+    required String numeroOficial,
+    OrdemServico? fallback,
+  }) async {
     final database = await db;
+    final rows = await database.query(
+      'ordens',
+      where: 'local_uuid = ?',
+      whereArgs: [localUuid],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      if (fallback == null) return;
+      await database.insert(
+        'ordens',
+        _toRow(fallback.copyWith(
+          localUuid: localUuid,
+          id: serverId,
+          numero: numeroOficial,
+          dirty: false,
+          pendingSync: false,
+        )),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      return;
+    }
+
+    final atual = '${rows.first['numero'] ?? ''}';
+    final historico = '${rows.first['numero_offline'] ?? ''}';
+    final numeroOffline = historico.isNotEmpty
+        ? historico
+        : (atual.startsWith('OFF-') ? atual : null);
+
     await database.update(
       'ordens',
-      _toRow(serverOs.copyWith(
+      {
+        'server_id': serverId,
+        'numero': numeroOficial,
+        'numero_offline': ?numeroOffline,
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      where: 'local_uuid = ?',
+      whereArgs: [localUuid],
+    );
+  }
+
+  Future<void> markSynced(String localUuid, OrdemServico serverOs) async {
+    await _substituirLinha(
+      serverOs.copyWith(
         localUuid: localUuid,
         dirty: false,
         pendingSync: false,
-      )),
-      where: 'local_uuid = ?',
-      whereArgs: [localUuid],
+      ),
+    );
+  }
+
+  /// Substitui a linha sem trocar `local_uuid` e sem apagar o OFF histórico.
+  Future<void> _substituirLinha(OrdemServico os) async {
+    final database = await db;
+    final row = _toRow(os);
+    final localUuid = '${row['local_uuid'] ?? ''}';
+    if (localUuid.isNotEmpty && (row['numero_offline'] == null || '${row['numero_offline']}'.isEmpty)) {
+      final existing = await database.query(
+        'ordens',
+        columns: ['numero_offline'],
+        where: 'local_uuid = ?',
+        whereArgs: [localUuid],
+        limit: 1,
+      );
+      final kept = existing.isEmpty ? null : existing.first['numero_offline'];
+      if (kept != null && '$kept'.isNotEmpty) {
+        row['numero_offline'] = kept;
+      }
+    }
+    await database.insert(
+      'ordens',
+      row,
+      conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }
 
@@ -200,6 +284,7 @@ class AppDatabase {
       id: row['server_id'] as int?,
       localUuid: row['local_uuid']?.toString(),
       numero: '${row['numero'] ?? ''}',
+      numeroOffline: row['numero_offline']?.toString(),
       cliente: '${row['cliente'] ?? ''}',
       telefone: '${row['telefone'] ?? ''}',
       endereco: '${row['endereco'] ?? ''}',
@@ -224,6 +309,7 @@ class AppDatabase {
       'local_uuid': os.localUuid ?? newLocalUuid(),
       'server_id': os.id,
       'numero': os.numero,
+      'numero_offline': os.numeroOffline,
       'cliente': os.cliente,
       'telefone': os.telefone,
       'endereco': os.endereco,

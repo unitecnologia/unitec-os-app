@@ -13,6 +13,11 @@ class ApiException implements Exception {
   final int? statusCode;
   final String? code;
 
+  bool get isAuth => statusCode == 401 || statusCode == 403;
+
+  /// Rede, timeout, DNS ou túnel — o ERP não respondeu.
+  bool get isOffline => statusCode == null;
+
   @override
   String toString() => message;
 }
@@ -38,8 +43,9 @@ class ApiClient {
     String path, {
     bool auth = true,
     bool device = true,
+    Duration? timeout,
   }) {
-    return _request('GET', path, auth: auth, device: device);
+    return _request('GET', path, auth: auth, device: device, timeout: timeout);
   }
 
   Future<Map<String, dynamic>> putJson(
@@ -154,6 +160,7 @@ class ApiClient {
     Map<String, dynamic>? body,
     bool auth = false,
     bool device = true,
+    Duration? timeout,
   }) async {
     final base = ApiConfig.apiBase;
     final uri = Uri.parse('$base$path');
@@ -197,7 +204,7 @@ class ApiClient {
     }
 
     try {
-      final res = await req.close().timeout(const Duration(seconds: 20));
+      final res = await req.close().timeout(timeout ?? const Duration(seconds: 20));
       final raw = await res.transform(utf8.decoder).join();
       Map<String, dynamic> json = {};
       if (raw.isNotEmpty) {

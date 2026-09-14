@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:unitec_os_app/config/api_config.dart';
@@ -7,6 +6,7 @@ import 'package:unitec_os_app/config/app_version.dart';
 import 'package:unitec_os_app/screens/minhas_os_screen.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/services/auth_service.dart';
+import 'package:unitec_os_app/services/sync_service.dart';
 import 'package:unitec_os_app/session/app_session.dart';
 import 'package:unitec_os_app/theme/app_theme.dart';
 
@@ -65,8 +65,11 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     try {
+      final anterior = ApiConfig.erpBaseUrl;
       final found = await _auth.discoverDevServer(preferred: _url.text);
       if (found == null) {
+        ApiConfig.setErpBaseUrl(anterior);
+        _url.text = ApiConfig.erpBaseUrl;
         if (AppSession.isLoggedIn) {
           if (!mounted) return;
           setState(() {
@@ -132,6 +135,7 @@ class _LoginScreenState extends State<LoginScreen> {
   void _iniciarPolling() {
     _poll?.cancel();
     _poll = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (!SyncService.instance.podeTentarErp) return;
       try {
         final status = await _auth.deviceStatus();
         if (!mounted) return;
@@ -195,6 +199,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     setState(() => _carregando = true);
+    final anterior = ApiConfig.erpBaseUrl;
     try {
       ApiConfig.setErpBaseUrl(_url.text);
       await _auth.login(
@@ -204,13 +209,22 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       AppSession.manterConectado = _manterConectado;
       AppSession.empresaNome = empresa.nome;
+      await ApiConfig.saveUrl();
       await AppSession.persist();
       if (!mounted) return;
       Navigator.of(context).pushReplacementNamed(MinhasOsScreen.route);
     } on ApiException catch (e) {
-      _toast(e.message);
+      if (e.isOffline) {
+        ApiConfig.setErpBaseUrl(anterior);
+        _url.text = ApiConfig.erpBaseUrl;
+        _toast('ERP não respondeu. A URL anterior foi mantida.');
+      } else {
+        _toast(e.message);
+      }
     } catch (_) {
-      _toast('Falha ao conectar no ERP.');
+      ApiConfig.setErpBaseUrl(anterior);
+      _url.text = ApiConfig.erpBaseUrl;
+      _toast('ERP não respondeu. A URL anterior foi mantida.');
     } finally {
       if (mounted) setState(() => _carregando = false);
     }
@@ -251,11 +265,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 enabled: !_carregando,
                 decoration: InputDecoration(
                   labelText: 'URL do ERP',
-                  hintText: ApiConfig.devCandidates.first,
+                  hintText: 'https://abc.trycloudflare.com',
                   prefixIcon: const Icon(Icons.dns_outlined),
-                  helperText: Platform.isAndroid
-                      ? 'Emulador: use 10.0.2.2 (não localhost)'
-                      : 'Dev local: 127.0.0.1:8000',
+                  helperText:
+                      'Endereço externo e túnel Cloudflare usam HTTPS.\n'
+                      'Ex.: https://abc.trycloudflare.com',
                 ),
                 keyboardType: TextInputType.url,
                 onSubmitted: (_) async {

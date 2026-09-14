@@ -1,4 +1,5 @@
 import 'package:unitec_os_app/config/api_config.dart';
+import 'package:unitec_os_app/config/erp_url.dart';
 import 'package:unitec_os_app/config/app_version.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/session/app_session.dart';
@@ -43,32 +44,40 @@ class AuthService {
 
   Future<bool> ping() async {
     try {
-      final json = await _client.getJson('/ping', auth: false, device: false);
-      return json['ok'] == true;
+      final json = await _client.getJson(
+        '/ping',
+        auth: false,
+        device: false,
+        timeout: const Duration(seconds: 4),
+      );
+      return json['ok'] == true || json.isNotEmpty;
+    } on ApiException catch (e) {
+      // 401/403 são resposta do ERP, não queda de túnel.
+      return e.isAuth;
     } catch (_) {
       return false;
     }
   }
 
-  /// Tenta URLs de desenvolvimento até o ping responder.
+  /// Testa o endereço informado. Túnel Cloudflare não cai para 10.0.2.2/127.0.0.1.
+  /// Se ninguém responder, restaura a URL anterior e não grava a tentativa falha.
   Future<String?> discoverDevServer({String? preferred}) async {
-    final tried = <String>{};
-    final candidates = <String>[
-      if (preferred != null && preferred.trim().isNotEmpty) preferred.trim(),
-      ...ApiConfig.devCandidates,
-    ];
+    final anterior = ApiConfig.erpBaseUrl;
+    final candidatos = ErpUrl.candidatosProva(
+      atual: anterior,
+      preferida: preferred,
+      locais: ApiConfig.devCandidates,
+    );
 
-    for (final raw in candidates) {
-      var url = raw.trim().replaceAll(RegExp(r'/+$'), '');
-      if (url.isEmpty) continue;
-      if (!url.startsWith('http://') && !url.startsWith('https://')) {
-        url = 'http://$url';
-      }
-      if (!tried.add(url)) continue;
-
+    for (final url in candidatos) {
       ApiConfig.setErpBaseUrl(url);
-      if (await ping()) return url;
+      if (await ping()) {
+        await ApiConfig.saveUrl();
+        return ApiConfig.erpBaseUrl;
+      }
     }
+
+    ApiConfig.setErpBaseUrl(anterior);
     return null;
   }
 

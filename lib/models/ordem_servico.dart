@@ -19,6 +19,7 @@ class OrdemServico {
     this.servicos = const [],
     this.observacao = '',
     this.horaInicio,
+    this.numeroOffline,
     this.dirty = false,
     this.pendingSync = false,
   });
@@ -26,6 +27,8 @@ class OrdemServico {
   final int? id;
   final String? localUuid;
   final String numero;
+  /// Número provisório OFF-xxxx. Não é o número oficial depois da sincronização.
+  final String? numeroOffline;
   final String cliente;
   final String telefone;
   final String endereco;
@@ -45,6 +48,9 @@ class OrdemServico {
 
   String get key => id != null ? 's:$id' : 'l:${localUuid ?? numero}';
 
+  /// Depois do vínculo com o ERP, [numero] já é o `numero_os` oficial.
+  String get numeroExibicao => numero;
+
   OrdemServico copyWith({
     int? id,
     String? localUuid,
@@ -63,6 +69,7 @@ class OrdemServico {
     List<PecaOs>? servicos,
     String? observacao,
     String? horaInicio,
+    String? numeroOffline,
     bool? dirty,
     bool? pendingSync,
   }) {
@@ -70,6 +77,7 @@ class OrdemServico {
       id: id ?? this.id,
       localUuid: localUuid ?? this.localUuid,
       numero: numero ?? this.numero,
+      numeroOffline: numeroOffline ?? this.numeroOffline,
       cliente: cliente ?? this.cliente,
       telefone: telefone ?? this.telefone,
       endereco: endereco ?? this.endereco,

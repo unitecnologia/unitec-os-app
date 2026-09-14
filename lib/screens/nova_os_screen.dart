@@ -87,6 +87,7 @@ class _NovaOsScreenState extends State<NovaOsScreen> {
   String _somenteDigitos(String v) => v.replaceAll(RegExp(r'\D'), '');
 
   bool _semConexao(Object e) {
+    if (e is ApiException && e.isOffline) return true;
     final msg = e is ApiException ? e.message.toLowerCase() : e.toString().toLowerCase();
     return msg.contains('sem conexão') ||
         msg.contains('socket') ||

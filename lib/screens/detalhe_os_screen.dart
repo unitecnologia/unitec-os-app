@@ -10,6 +10,7 @@ import 'package:unitec_os_app/models/ordem_servico.dart';
 import 'package:unitec_os_app/models/peca_os.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/services/os_service.dart';
+import 'package:unitec_os_app/services/sync_service.dart';
 import 'package:unitec_os_app/theme/app_theme.dart';
 import 'package:unitec_os_app/widgets/assinatura_pad_dialog.dart';
 
@@ -43,8 +44,6 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
   final Set<String> _fotosSincronizadas = {};
   Uint8List? _assinaturaPng;
   bool _assinaturaSincronizada = false;
-  bool _enviandoMidia = false;
-
   @override
   void initState() {
     super.initState();
@@ -148,7 +147,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
         _salvando = false;
       });
       _toast(updated.pendingSync
-          ? 'Atendimento iniciado (será sincronizado).'
+          ? 'Salvo no aparelho — aguardando sincronização.'
           : 'Atendimento iniciado.');
     } on ApiException catch (e) {
       _toast(e.message);
@@ -195,14 +194,12 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
           ..addAll(updated.pecas);
         _salvando = false;
       });
-      if (finalizar) {
-        _toast(updated.pendingSync
-            ? 'OS enviada para faturamento (aguardando sync).'
-            : 'OS enviada para faturamento.');
+      if (updated.pendingSync) {
+        _toast('Salvo no aparelho — aguardando sincronização.');
+      } else if (finalizar) {
+        _toast('OS enviada para faturamento.');
       } else {
-        _toast(updated.pendingSync
-            ? 'Salvo localmente (aguardando sync).'
-            : 'OS salva.');
+        _toast('OS salva.');
       }
       // Volta para a tela inicial (Minhas OS) após salvar ou finalizar.
       if (!mounted) return;
@@ -386,15 +383,6 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     }
   }
 
-  Future<void> _marcarSincronizado(File arquivo) async {
-    try {
-      await _marcadorSync(arquivo).writeAsString(
-        DateTime.now().toIso8601String(),
-        flush: true,
-      );
-    } catch (_) {}
-  }
-
   Future<void> _marcarNaoSincronizado(File arquivo) async {
     try {
       final m = _marcadorSync(arquivo);
@@ -407,12 +395,19 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     if (bytes == null || !mounted) return;
     await _salvarAssinaturaLocal(widget.osKey, bytes);
     if (!mounted) return;
+    final file = await _arquivoAssinatura(widget.osKey);
+    await _enfileirarArquivo(file, 'assinatura');
+    if (!mounted) return;
     setState(() {
       _assinaturaPng = bytes;
       _assinaturaSincronizada = false;
     });
-    _toast('Assinatura salva.');
-    await _enviarAssinaturaSePossivel(bytes);
+    _toast('Salvo no aparelho — aguardando sincronização.');
+    await _tentarEnviarFila();
+    if (!mounted) return;
+    if (await _estaSincronizado(file)) {
+      setState(() => _assinaturaSincronizada = true);
+    }
   }
 
   String _chavePastaFotos(String osKey) =>
@@ -460,87 +455,64 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     }
   }
 
+  Future<String?> _uuidDaOs() async {
+    final atual = _os?.localUuid;
+    if (atual != null && atual.isNotEmpty) return atual;
+    final os = await _osService.obterPorKey(widget.osKey);
+    final uuid = os?.localUuid;
+    if (uuid == null || uuid.isEmpty) return null;
+    return uuid;
+  }
+
+  Future<void> _enfileirarArquivo(File arquivo, String tipo) async {
+    final uuid = await _uuidDaOs();
+    if (uuid == null) return;
+    await _osService.enfileirarMidia(
+      localUuid: uuid,
+      serverId: _os?.id,
+      tipo: tipo,
+      path: arquivo.path,
+    );
+  }
+
+  Future<void> _tentarEnviarFila() async {
+    if (!SyncService.instance.podeTentarErp) return;
+    await SyncService.instance.sincronizar(forcePull: false);
+    await _recarregarVinculoServidor();
+  }
+
+  /// Atualiza id e número oficial sem recriar a OS nem limpar o atendimento em edição.
+  Future<void> _recarregarVinculoServidor() async {
+    final uuid = _os?.localUuid;
+    if (uuid == null || uuid.isEmpty) return;
+    final atual = await _osService.obterPorKey('l:$uuid');
+    if (!mounted || atual == null) return;
+    setState(() => _os = atual);
+  }
+
   Future<void> _sincronizarMidiasPendentes() async {
-    final osId = _os?.id;
-    if (osId == null || _enviandoMidia) return;
-
     for (final foto in List<File>.from(_fotos)) {
-      if (_fotosSincronizadas.contains(foto.path)) continue;
-      await _enviarFotoSePossivel(foto, silencioso: true);
+      if (await _estaSincronizado(foto)) continue;
+      await _enfileirarArquivo(foto, 'foto');
     }
-
-    if (_assinaturaPng != null && !_assinaturaSincronizada) {
-      await _enviarAssinaturaSePossivel(_assinaturaPng!, silencioso: true);
+    final assinatura = await _arquivoAssinatura(widget.osKey);
+    if (await assinatura.exists() && !await _estaSincronizado(assinatura)) {
+      await _enfileirarArquivo(assinatura, 'assinatura');
     }
-  }
-
-  Future<void> _enviarFotoSePossivel(
-    File foto, {
-    bool silencioso = false,
-  }) async {
-    final osId = _os?.id;
-    if (osId == null) {
-      if (!silencioso) {
-        _toast('Salve a OS no ERP antes de enviar fotos.');
-      }
-      return;
+    await _tentarEnviarFila();
+    if (!mounted) return;
+    final fotosSync = <String>{};
+    for (final foto in _fotos) {
+      if (await _estaSincronizado(foto)) fotosSync.add(foto.path);
     }
-    try {
-      setState(() => _enviandoMidia = true);
-      await _osService.enviarFotoOs(osId: osId, arquivo: foto);
-      await _marcarSincronizado(foto);
-      if (!mounted) return;
-      setState(() {
-        _fotosSincronizadas.add(foto.path);
-        _enviandoMidia = false;
-      });
-      if (!silencioso) _toast('Foto enviada ao ERP.');
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _enviandoMidia = false);
-      if (!silencioso) _toast(e.message);
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _enviandoMidia = false);
-      if (!silencioso) {
-        _toast('Falha ao enviar foto. Mantida localmente.');
-      }
-    }
-  }
-
-  Future<void> _enviarAssinaturaSePossivel(
-    Uint8List bytes, {
-    bool silencioso = false,
-  }) async {
-    final osId = _os?.id;
-    if (osId == null) {
-      if (!silencioso) {
-        _toast('Salve a OS no ERP antes de enviar a assinatura.');
-      }
-      return;
-    }
-    try {
-      setState(() => _enviandoMidia = true);
-      await _osService.enviarAssinaturaOs(osId: osId, pngBytes: bytes);
-      final file = await _arquivoAssinatura(widget.osKey);
-      await _marcarSincronizado(file);
-      if (!mounted) return;
-      setState(() {
-        _assinaturaSincronizada = true;
-        _enviandoMidia = false;
-      });
-      if (!silencioso) _toast('Assinatura enviada ao ERP.');
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _enviandoMidia = false);
-      if (!silencioso) _toast(e.message);
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _enviandoMidia = false);
-      if (!silencioso) {
-        _toast('Falha ao enviar assinatura. Mantida localmente.');
-      }
-    }
+    final assinaturaSync = await _estaSincronizado(assinatura);
+    if (!mounted) return;
+    setState(() {
+      _fotosSincronizadas
+        ..clear()
+        ..addAll(fotosSync);
+      _assinaturaSincronizada = assinaturaSync;
+    });
   }
 
   Future<void> _adicionarFoto() async {
@@ -579,9 +551,15 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
           '${DateTime.now().millisecondsSinceEpoch}_${_fotos.length + 1}.jpg';
       final destino = File(p.join(pasta.path, nome));
       await File(escolhida.path).copy(destino.path);
+      await _enfileirarArquivo(destino, 'foto');
       if (!mounted) return;
       setState(() => _fotos.add(destino));
-      await _enviarFotoSePossivel(destino);
+      _toast('Salvo no aparelho — aguardando sincronização.');
+      await _tentarEnviarFila();
+      if (!mounted) return;
+      if (await _estaSincronizado(destino)) {
+        setState(() => _fotosSincronizadas.add(destino.path));
+      }
     } catch (_) {
       if (!mounted) return;
       _toast('Não foi possível adicionar a foto.');
@@ -610,6 +588,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
     try {
       if (await foto.exists()) await foto.delete();
       await _marcarNaoSincronizado(foto);
+      await _osService.removerMidiaFila(foto.path);
     } catch (_) {}
     if (!mounted) return;
     setState(() {
@@ -687,7 +666,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('OS ${os.numero}'),
+        title: Text('OS ${os.numeroExibicao}'),
         actions: [
           if (os.pendingSync)
             const Padding(
@@ -711,7 +690,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> {
                         Row(
                           children: [
                             Text(
-                              'OS ${os.numero}',
+                              'OS ${os.numeroExibicao}',
                               style: const TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.w800,
