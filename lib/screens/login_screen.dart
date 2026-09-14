@@ -65,10 +65,9 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     try {
-      final anterior = ApiConfig.erpBaseUrl;
       final found = await _auth.discoverDevServer(preferred: _url.text);
       if (found == null) {
-        ApiConfig.setErpBaseUrl(anterior);
+        // Mantém o que o usuário digitou (já normalizado/salvo se for público).
         _url.text = ApiConfig.erpBaseUrl;
         if (AppSession.isLoggedIn) {
           if (!mounted) return;
@@ -82,8 +81,9 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         setState(() {
           _erro =
-              'ERP não respondeu.\n'
-              'Toque na engrenagem para conferir a URL do servidor.';
+              'ERP não respondeu em ${ApiConfig.erpBaseUrl}.\n'
+              'Use o HTTPS do túnel sem porta, ex.:\n'
+              'https://minimercadoayalamatriz.unierp.uk';
           _carregando = false;
         });
         return;
@@ -265,11 +265,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 enabled: !_carregando,
                 decoration: InputDecoration(
                   labelText: 'URL do ERP',
-                  hintText: 'https://abc.trycloudflare.com',
+                  hintText: 'https://loja.unierp.uk',
                   prefixIcon: const Icon(Icons.dns_outlined),
                   helperText:
-                      'Endereço externo e túnel Cloudflare usam HTTPS.\n'
-                      'Ex.: https://abc.trycloudflare.com',
+                      'Túnel Cloudflare / unierp.uk: só HTTPS, sem :8000.\n'
+                      'Ex.: https://minimercadoayalamatriz.unierp.uk',
                 ),
                 keyboardType: TextInputType.url,
                 onSubmitted: (_) async {

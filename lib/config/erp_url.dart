@@ -1,7 +1,7 @@
 enum ErpAlcance { online, offline, verificando }
 
 /// Normalização da URL do ERP e da descoberta local.
-/// Túnel Cloudflare nunca vira http nem é substituído por localhost.
+/// Túnel Cloudflare / unierp.uk nunca vira http nem é substituído por localhost.
 class ErpUrl {
   /// Wi-Fi não significa online. Só [apiRespondeu] true marca o ERP como online.
   static ErpAlcance avaliar({
@@ -16,6 +16,7 @@ class ErpUrl {
   static const hostsNuvem = [
     'trycloudflare.com',
     'cfargotunnel.com',
+    'unierp.uk',
   ];
 
   static String normalize(String raw) {
@@ -27,13 +28,31 @@ class ErpUrl {
       texto = '${_esquemaPara(host)}://$texto';
     }
 
-    final uri = Uri.tryParse(texto);
+    var uri = Uri.tryParse(texto);
     if (uri == null || uri.host.isEmpty) return texto;
 
-    if (ehNuvem(uri.host) && uri.scheme != 'https') {
-      texto = uri.replace(scheme: 'https').toString().replaceAll(RegExp(r'/+$'), '');
+    final host = uri.host;
+    final publico = ehNuvem(host) || !_ehLocal(host);
+    var scheme = uri.scheme;
+    var port = uri.hasPort ? uri.port : null;
+
+    if (publico) {
+      scheme = 'https';
+      // Cloudflare / unierp.uk só atendem 443. Porta 8000/8765 na URL pública quebra o app.
+      if (port != null && port != 443) {
+        port = null;
+      }
     }
-    return texto;
+
+    return Uri(
+      scheme: scheme,
+      userInfo: uri.userInfo.isEmpty ? null : uri.userInfo,
+      host: host,
+      port: port,
+      path: uri.path,
+      query: uri.hasQuery ? uri.query : null,
+      fragment: uri.fragment.isEmpty ? null : uri.fragment,
+    ).toString().replaceAll(RegExp(r'/+$'), '');
   }
 
   static bool ehNuvem(String host) {
@@ -50,7 +69,14 @@ class ErpUrl {
     return ehNuvem(uri.host);
   }
 
-  /// Só a URL do túnel. Localhost/emulador não entram na lista.
+  /// Host público (túnel/domínio) — nunca mistura com candidatos locais.
+  static bool ehPublicaUrl(String url) {
+    final uri = Uri.tryParse(normalize(url));
+    if (uri == null || uri.host.isEmpty) return false;
+    return ehNuvem(uri.host) || !_ehLocal(uri.host);
+  }
+
+  /// Só a URL do túnel/pública. Localhost/emulador não entram na lista.
   static List<String> candidatosProva({
     required String atual,
     String? preferida,
@@ -63,7 +89,7 @@ class ErpUrl {
     final pedida = (preferida ?? '').trim();
     final base = pedida.isNotEmpty ? normalize(pedida) : normalize(atual);
     if (base.isEmpty) return locais.map(normalize).toList();
-    if (ehNuvemUrl(base)) return [base];
+    if (ehPublicaUrl(base)) return [base];
 
     final lista = <String>[base];
     for (final local in locais) {

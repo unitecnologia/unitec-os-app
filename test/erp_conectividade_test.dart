@@ -15,6 +15,21 @@ void main() {
       ErpUrl.normalize('nome.cfargotunnel.com'),
       'https://nome.cfargotunnel.com',
     );
+    expect(
+      ErpUrl.normalize('minimercadoayalamatriz.unierp.uk'),
+      'https://minimercadoayalamatriz.unierp.uk',
+    );
+  });
+
+  test('unierp.uk com :8000 remove a porta', () {
+    expect(
+      ErpUrl.normalize('https://minimercadoayalamatriz.unierp.uk:8000'),
+      'https://minimercadoayalamatriz.unierp.uk',
+    );
+    expect(
+      ErpUrl.normalize('minimercadoayalamatriz.unierp.uk:8000'),
+      'https://minimercadoayalamatriz.unierp.uk',
+    );
   });
 
   test('túnel fora não troca a URL por localhost', () {
@@ -28,6 +43,18 @@ void main() {
       ErpUrl.aposTeste(anterior: tunel, tentada: tunel, respondeu: false),
       tunel,
     );
+  });
+
+  test('unierp.uk não cai para IP local', () {
+    const tunel = 'https://minimercadoayalamatriz.unierp.uk';
+    final candidatos = ErpUrl.candidatosProva(
+      atual: 'http://192.168.0.10:8000',
+      preferida: '$tunel:8000',
+    );
+
+    expect(candidatos, [tunel]);
+    expect(ErpUrl.ehNuvemUrl(tunel), isTrue);
+    expect(ErpUrl.ehPublicaUrl(tunel), isTrue);
   });
 
   test('URL nova inválida restaura a anterior válida', () {

@@ -59,10 +59,11 @@ class AuthService {
     }
   }
 
-  /// Testa o endereço informado. Túnel Cloudflare não cai para 10.0.2.2/127.0.0.1.
-  /// Se ninguém responder, restaura a URL anterior e não grava a tentativa falha.
+  /// Testa o endereço informado. Túnel Cloudflare / unierp.uk não cai para 10.0.2.2/127.0.0.1.
+  /// Em falha de URL pública, grava a URL pedida (sem voltar ao IP antigo) e retorna null.
   Future<String?> discoverDevServer({String? preferred}) async {
     final anterior = ApiConfig.erpBaseUrl;
+    final preferidaNorm = ErpUrl.normalize(preferred ?? '');
     final candidatos = ErpUrl.candidatosProva(
       atual: anterior,
       preferida: preferred,
@@ -75,6 +76,13 @@ class AuthService {
         await ApiConfig.saveUrl();
         return ApiConfig.erpBaseUrl;
       }
+    }
+
+    // Usuário pediu um host público: mantém e salva para não “voltar ao IP antigo”.
+    if (preferidaNorm.isNotEmpty && ErpUrl.ehPublicaUrl(preferidaNorm)) {
+      ApiConfig.setErpBaseUrl(preferidaNorm);
+      await ApiConfig.saveUrl();
+      return null;
     }
 
     ApiConfig.setErpBaseUrl(anterior);
