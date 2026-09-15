@@ -15,7 +15,9 @@ import 'package:unitec_os_app/services/whatsapp_contato.dart';
 import 'package:unitec_os_app/theme/app_theme.dart';
 import 'package:unitec_os_app/widgets/assinatura_pad_dialog.dart';
 import 'package:unitec_os_app/widgets/barcode_scan_page.dart';
+import 'package:unitec_os_app/widgets/incluir_peca_sheet.dart';
 import 'package:unitec_os_app/widgets/peca_lancada_card.dart';
+import 'package:unitec_os_app/widgets/selecionar_produto_sheet.dart';
 
 class DetalheOsScreen extends StatefulWidget {
   const DetalheOsScreen({super.key, required this.osKey});
@@ -322,23 +324,21 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> with WidgetsBindingOb
   }
 
   Future<void> _adicionarPeca() async {
-    final selecionado = await showDialog<ProdutoResumo>(
-      context: context,
-      builder: (ctx) => const _BuscarCatalogoDialog(
-        titulo: 'Selecionar peça',
-        tipo: 'produto',
-      ),
+    final selecionado = await SelecionarProdutoSheet.abrir(
+      context,
+      titulo: 'Selecionar produto',
+      tipo: 'produto',
     );
     if (selecionado == null || !mounted) return;
-    await _confirmarQuantidadePeca(selecionado);
+    await _confirmarInclusaoPeca(selecionado);
   }
 
-  Future<void> _confirmarQuantidadePeca(ProdutoResumo selecionado) async {
-    final qtd = await showDialog<double>(
-      context: context,
-      builder: (ctx) => const _QuantidadePecaDialog(),
+  Future<void> _confirmarInclusaoPeca(ProdutoResumo selecionado) async {
+    final lancamento = await IncluirPecaSheet.abrir(
+      context,
+      produto: selecionado,
     );
-    if (qtd == null || !mounted) return;
+    if (lancamento == null || !mounted) return;
 
     setState(() {
       _pecas.add(
@@ -350,8 +350,9 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> with WidgetsBindingOb
               : selecionado.codigoBarrasCaixa,
           imei: selecionado.imei,
           descricao: selecionado.descricao,
-          preco: selecionado.preco,
-          qtd: qtd,
+          preco: lancamento.precoUnitario,
+          qtd: lancamento.quantidade,
+          desconto: lancamento.desconto,
         ),
       );
     });
@@ -1133,7 +1134,7 @@ class _DetalheOsScreenState extends State<DetalheOsScreen> with WidgetsBindingOb
                               peca: e.value,
                               qtd: _fmtQtd(e.value.qtd),
                               unitario: _fmtMoney(e.value.preco),
-                              total: _fmtMoney(e.value.preco * e.value.qtd),
+                              total: _fmtMoney(e.value.total),
                               podeExcluir: !finalizada && !_salvando,
                               onExcluir: () {
                                 setState(() => _pecas.removeAt(e.key));
@@ -1387,15 +1388,6 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
   }
 
   Future<void> _escanear() async {
-    if (!SyncService.instance.podeTentarErp) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('O ERP precisa estar online para achar a peça pelo código.'),
-        ),
-      );
-      return;
-    }
     final codigo = await BarcodeScanPage.abrir(context);
     if (codigo == null || !mounted) return;
     _busca.text = codigo.trim();
@@ -1418,25 +1410,30 @@ class _BuscarCatalogoDialogState extends State<_BuscarCatalogoDialog> {
     });
     try {
       final lista = await _osService.buscarProdutos(_busca.text, tipo: widget.tipo);
+      final temCatalogo = await _osService.catalogoDisponivel();
       if (!mounted) return;
-      setState(() {
-        _lista = lista.take(25).toList();
-        _buscando = false;
-        _selecionadoId = null;
-        if (lista.isEmpty && !SyncService.instance.podeTentarErp) {
-          _erro = 'ERP offline. A busca precisa do ERP respondendo.';
-        } else if (lista.isEmpty && _busca.text.trim().isNotEmpty) {
-          _erro = widget.tipo == 'servico'
+      String? erro;
+      if (lista.isEmpty) {
+        if (!SyncService.instance.podeTentarErp && !temCatalogo) {
+          erro = 'Catálogo ainda não sincronizado. Conecte uma vez ao ERP.';
+        } else if (_busca.text.trim().isNotEmpty) {
+          erro = widget.tipo == 'servico'
               ? 'Nenhum serviço encontrado.'
               : 'Nenhuma peça encontrada.';
         }
+      }
+      setState(() {
+        _lista = lista.take(100).toList();
+        _buscando = false;
+        _selecionadoId = null;
+        _erro = erro;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _lista = [];
         _buscando = false;
-        _erro = 'Falha ao buscar no ERP. Verifique a conexão.';
+        _erro = 'Falha ao buscar.';
       });
     }
   }
@@ -1783,57 +1780,6 @@ class _CampoComAcao extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 8),
             visualDensity: VisualDensity.compact,
           ),
-        ),
-      ],
-    );
-  }
-}
-
-class _QuantidadePecaDialog extends StatefulWidget {
-  const _QuantidadePecaDialog();
-
-  @override
-  State<_QuantidadePecaDialog> createState() => _QuantidadePecaDialogState();
-}
-
-class _QuantidadePecaDialogState extends State<_QuantidadePecaDialog> {
-  final _ctrl = TextEditingController(text: '1');
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  void _confirmar() {
-    final raw = _ctrl.text.trim().replaceAll('.', '').replaceAll(',', '.');
-    final qtd = double.tryParse(raw);
-    if (qtd == null || qtd <= 0) return;
-    Navigator.of(context).pop(qtd);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Quantidade'),
-      content: TextField(
-        controller: _ctrl,
-        autofocus: true,
-        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-        decoration: const InputDecoration(
-          labelText: 'Qtd',
-          hintText: '1',
-        ),
-        onSubmitted: (_) => _confirmar(),
-      ),
-      actions: [
-        OutlinedButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancelar'),
-        ),
-        ElevatedButton(
-          onPressed: _confirmar,
-          child: const Text('Adicionar'),
         ),
       ],
     );

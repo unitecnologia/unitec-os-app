@@ -205,17 +205,21 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
       if (forcePull && !await _temCriacaoPendente()) {
         pulled = await _pullOrdens();
       }
+      final catalogoOk = await _pullCatalogo();
       await refreshPending();
       _syncing = false;
       marcarErpAlcancavel();
+      final base = _pending > 0
+          ? 'Parcial: $_pending pendente(s).'
+          : 'Sincronizado.';
       return SyncResult(
         ok: true,
         pulled: pulled,
         pushed: pushed,
         pending: _pending,
-        message: _pending > 0
-            ? 'Parcial: $_pending pendente(s).'
-            : 'Sincronizado.',
+        message: catalogoOk
+            ? '$base Catálogo atualizado.'
+            : '$base Catálogo não baixou — tente sync de novo.',
       );
     } on ApiException catch (e) {
       if (e.isOffline) marcarErpInalcancavel();
@@ -257,6 +261,55 @@ class SyncService extends ChangeNotifier with WidgetsBindingObserver {
       n++;
     }
     return n;
+  }
+
+  bool _catalogoPulling = false;
+
+  /// Retorna true se o catálogo foi gravado localmente.
+  Future<bool> _pullCatalogo() async {
+    if (!podeTentarErp || _catalogoPulling) {
+      return await _db.catalogoSincronizado();
+    }
+    _catalogoPulling = true;
+    try {
+      final json = await _client.getJson(
+        '/sync/pull',
+        timeout: const Duration(seconds: 90),
+      );
+      final data = json['data'];
+      if (data is! Map) return false;
+      final map = Map<String, dynamic>.from(data);
+      final clientes = (map['clientes'] is List)
+          ? (map['clientes'] as List)
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList()
+          : <Map<String, dynamic>>[];
+      final produtos = (map['produtos'] is List)
+          ? (map['produtos'] as List)
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList()
+          : <Map<String, dynamic>>[];
+      final grupos = (map['grupos'] is List)
+          ? (map['grupos'] as List).map((e) => '$e'.trim()).where((e) => e.isNotEmpty).toList()
+          : <String>[];
+      await _db.replaceCatalogo(
+        clientes: clientes,
+        produtos: produtos,
+        grupos: grupos,
+      );
+      return true;
+    } on ApiException catch (e) {
+      if (e.isOffline) marcarErpInalcancavel();
+      _lastError = e.message;
+      return false;
+    } catch (e) {
+      _lastError = '$e';
+      return false;
+    } finally {
+      _catalogoPulling = false;
+    }
   }
 
   Future<int> _pushQueue() async {

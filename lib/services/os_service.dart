@@ -4,109 +4,17 @@ import 'dart:io';
 import 'package:sqflite/sqflite.dart';
 import 'package:unitec_os_app/config/device_identity.dart';
 import 'package:unitec_os_app/data/local/app_database.dart';
+import 'package:unitec_os_app/models/cliente_resumo.dart';
 import 'package:unitec_os_app/models/ordem_servico.dart';
 import 'package:unitec_os_app/models/peca_os.dart';
+import 'package:unitec_os_app/models/produto_resumo.dart';
 import 'package:unitec_os_app/services/api_client.dart';
 import 'package:unitec_os_app/services/os_create_vinculo.dart';
 import 'package:unitec_os_app/services/sync_service.dart';
 import 'package:unitec_os_app/session/app_session.dart';
 
-class ClienteResumo {
-  const ClienteResumo({
-    required this.id,
-    required this.nome,
-    this.telefone = '',
-    this.email = '',
-    this.cpfCnpj = '',
-    this.cep = '',
-    this.endereco = '',
-    this.enderecoCompleto = '',
-    this.numero = '',
-    this.bairro = '',
-    this.cidade = '',
-    this.uf = '',
-  });
-
-  final int id;
-  final String nome;
-  final String telefone;
-  final String email;
-  final String cpfCnpj;
-  final String cep;
-  final String endereco;
-  final String enderecoCompleto;
-  final String numero;
-  final String bairro;
-  final String cidade;
-  final String uf;
-
-  factory ClienteResumo.fromJson(Map<String, dynamic> json) {
-    return ClienteResumo(
-      id: json['id'] is int ? json['id'] as int : int.parse('${json['id']}'),
-      nome: '${json['nome'] ?? ''}',
-      telefone: '${json['telefone'] ?? ''}',
-      email: '${json['email'] ?? ''}',
-      cpfCnpj: '${json['cpf_cnpj'] ?? ''}',
-      cep: '${json['cep'] ?? ''}',
-      endereco: '${json['endereco'] ?? ''}',
-      enderecoCompleto: '${json['endereco_completo'] ?? json['endereco'] ?? ''}',
-      numero: '${json['numero'] ?? ''}',
-      bairro: '${json['bairro'] ?? ''}',
-      cidade: '${json['cidade'] ?? ''}',
-      uf: '${json['uf'] ?? ''}',
-    );
-  }
-}
-
-class ProdutoResumo {
-  const ProdutoResumo({
-    required this.id,
-    required this.descricao,
-    this.codigo = '',
-    this.codigoBarras = '',
-    this.codigoBarrasCaixa = '',
-    this.imei = '',
-    this.numeroSerie = '',
-    this.unidade = 'UN',
-    this.preco = 0,
-  });
-
-  final int id;
-  final String descricao;
-  final String codigo;
-  final String codigoBarras;
-  final String codigoBarrasCaixa;
-  final String imei;
-  final String numeroSerie;
-  final String unidade;
-  final double preco;
-
-  bool correspondeCodigo(String codigo) {
-    final alvo = codigo.trim();
-    if (alvo.isEmpty) return false;
-    return this.codigo.trim() == alvo ||
-        codigoBarras.trim() == alvo ||
-        codigoBarrasCaixa.trim() == alvo ||
-        imei.trim() == alvo ||
-        numeroSerie.trim() == alvo;
-  }
-
-  factory ProdutoResumo.fromJson(Map<String, dynamic> json) {
-    return ProdutoResumo(
-      id: json['id'] is int ? json['id'] as int : int.parse('${json['id']}'),
-      descricao: '${json['descricao'] ?? ''}',
-      codigo: '${json['codigo'] ?? ''}',
-      codigoBarras: '${json['codigo_barras'] ?? ''}',
-      codigoBarrasCaixa: '${json['codigo_barras_caixa'] ?? ''}',
-      imei: '${json['imei'] ?? ''}',
-      numeroSerie: '${json['numero_serie'] ?? ''}',
-      unidade: '${json['unidade'] ?? 'UN'}',
-      preco: json['preco'] is num
-          ? (json['preco'] as num).toDouble()
-          : double.tryParse('${json['preco'] ?? 0}') ?? 0,
-    );
-  }
-}
+export 'package:unitec_os_app/models/cliente_resumo.dart';
+export 'package:unitec_os_app/models/produto_resumo.dart';
 
 /// Local-first: lê/grava SQLite; enfileira mutações; tenta sync se online.
 class OsService {
@@ -162,8 +70,12 @@ class OsService {
   }
 
   Future<List<ClienteResumo>> buscarClientes(String termo) async {
+    final locais = await _db.buscarClientesLocal(termo);
+    if (await _db.catalogoSincronizado() || !SyncService.instance.podeTentarErp) {
+      return locais;
+    }
+    // Fallback online se o catálogo ainda não foi baixado.
     final q = termo.trim();
-    if (!SyncService.instance.podeTentarErp) return [];
     final path = q.isEmpty
         ? '/clientes'
         : '/clientes?q=${Uri.encodeQueryComponent(q)}';
@@ -183,13 +95,25 @@ class OsService {
   Future<List<ProdutoResumo>> buscarProdutos(
     String termo, {
     String tipo = 'produto',
+    String? grupo,
   }) async {
+    final locais = await _db.buscarProdutosLocal(
+      termo,
+      tipo: tipo,
+      grupo: grupo,
+    );
+    if (locais.isNotEmpty || await _db.catalogoSincronizado() || !SyncService.instance.podeTentarErp) {
+      return locais;
+    }
     final q = termo.trim();
     final params = <String>['tipo=${Uri.encodeQueryComponent(tipo)}'];
     if (q.isNotEmpty) {
       params.add('q=${Uri.encodeQueryComponent(q)}');
     }
-    if (!SyncService.instance.podeTentarErp) return [];
+    final g = (grupo ?? '').trim();
+    if (g.isNotEmpty) {
+      params.add('grupo=${Uri.encodeQueryComponent(g)}');
+    }
     final path = '/produtos?${params.join('&')}';
     try {
       final json = await _client.getJson(path);
@@ -203,6 +127,26 @@ class OsService {
       return [];
     }
   }
+
+  Future<List<String>> buscarGrupos() async {
+    final locais = await _db.listarGruposLocal();
+    if (locais.isNotEmpty || await _db.catalogoSincronizado() || !SyncService.instance.podeTentarErp) {
+      return locais;
+    }
+    try {
+      final json = await _client.getJson('/grupos');
+      final data = json['data'];
+      if (data is! List) return [];
+      return data
+          .map((e) => '$e'.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+    } on ApiException {
+      return [];
+    }
+  }
+
+  Future<bool> catalogoDisponivel() => _db.catalogoSincronizado();
 
   Future<List<ProdutoResumo>> buscarServicos(String termo) {
     return buscarProdutos(termo, tipo: 'servico');

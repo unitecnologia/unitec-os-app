@@ -7,6 +7,7 @@ class PecaOs {
     required this.descricao,
     this.preco = 0,
     this.qtd = 1,
+    this.desconto = 0,
   });
 
   final int? produtoId;
@@ -16,6 +17,11 @@ class PecaOs {
   final String descricao;
   final double preco;
   final double qtd;
+  final double desconto;
+
+  double get bruto => preco * qtd;
+
+  double get total => (bruto - desconto).clamp(0.0, double.infinity);
 
   String get label {
     if (codigo.isNotEmpty) return '$codigo — $descricao';
@@ -30,6 +36,7 @@ class PecaOs {
     String? descricao,
     double? preco,
     double? qtd,
+    double? desconto,
   }) {
     return PecaOs(
       produtoId: produtoId ?? this.produtoId,
@@ -39,6 +46,7 @@ class PecaOs {
       descricao: descricao ?? this.descricao,
       preco: preco ?? this.preco,
       qtd: qtd ?? this.qtd,
+      desconto: desconto ?? this.desconto,
     );
   }
 
@@ -58,6 +66,9 @@ class PecaOs {
         qtd: m['qtd'] is num
             ? (m['qtd'] as num).toDouble()
             : double.tryParse('${m['qtd'] ?? 1}') ?? 1,
+        desconto: m['desconto'] is num
+            ? (m['desconto'] as num).toDouble()
+            : double.tryParse('${m['desconto'] ?? 0}') ?? 0,
       );
     }
     return PecaOs(descricao: '$raw'.trim());
@@ -71,5 +82,6 @@ class PecaOs {
         'descricao': descricao,
         'preco': preco,
         'qtd': qtd,
+        if (desconto > 0) 'desconto': desconto,
       };
 }

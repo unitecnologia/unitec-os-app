@@ -273,7 +273,7 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                                     ? 'Verificando se o ERP responde…'
                                     : !online
                                         ? (_sync.semRede
-                                            ? 'Sem internet — as OS ficam salvas neste celular.'
+                                            ? 'Sem internet — OS, clientes e produtos do cache local.'
                                             : 'Internet no celular, mas o ERP não respondeu. Trabalho local continua.')
                                         : '$pending alteração(ões) aguardando sync.',
                                 style: const TextStyle(
@@ -378,12 +378,17 @@ class _MinhasOsScreenState extends State<MinhasOsScreen> {
                       ),
                       const SizedBox(height: 12),
                       if (_lista.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 40),
+                        Padding(
+                          padding: const EdgeInsets.only(top: 40),
                           child: Center(
                             child: Text(
-                              'Nenhuma OS nesta data.',
-                              style: TextStyle(color: AppTheme.muted),
+                              _todas.isEmpty
+                                  ? (online
+                                      ? 'Nenhuma OS no aparelho. Sincronize com o ERP.'
+                                      : 'Nenhuma OS salva neste celular. Conecte uma vez para baixar.')
+                                  : 'Nenhuma OS nesta data.',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: AppTheme.muted),
                             ),
                           ),
                         )
@@ -501,9 +506,18 @@ String _horaLista(String dataHora) {
   return dataHora;
 }
 
-/// Compara `dataHora` (`dd/MM/yyyy HH:mm` ou `dd/MM HH:mm`) com o dia filtrado.
+/// Compara `dataHora` com o dia filtrado.
+/// Aceita `dd/MM/yyyy HH:mm`, `dd/MM HH:mm` e ISO `yyyy-MM-dd...`.
 bool _dataHoraNoDia(String dataHora, DateTime dia) {
-  final partesEspaco = dataHora.trim().split(RegExp(r'\s+'));
+  final raw = dataHora.trim();
+  if (raw.isEmpty) return false;
+
+  final iso = DateTime.tryParse(raw);
+  if (iso != null) {
+    return iso.year == dia.year && iso.month == dia.month && iso.day == dia.day;
+  }
+
+  final partesEspaco = raw.split(RegExp(r'\s+'));
   if (partesEspaco.isEmpty) return false;
   final parteData = partesEspaco.first;
   if (parteData.isEmpty) return false;

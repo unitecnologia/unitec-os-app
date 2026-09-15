@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:unitec_os_app/models/cliente_resumo.dart';
 import 'package:unitec_os_app/models/ordem_servico.dart';
 import 'package:unitec_os_app/models/peca_os.dart';
+import 'package:unitec_os_app/models/produto_resumo.dart';
 import 'package:uuid/uuid.dart';
 
 class AppDatabase {
@@ -20,43 +22,11 @@ class AppDatabase {
     final path = p.join(dir.path, 'unitec_os.db');
     _db = await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
-        await db.execute('''
-          CREATE TABLE ordens (
-            local_uuid TEXT PRIMARY KEY,
-            server_id INTEGER,
-            numero TEXT NOT NULL,
-            numero_offline TEXT,
-            cliente TEXT NOT NULL,
-            telefone TEXT,
-            endereco TEXT,
-            equipamento TEXT,
-            problema TEXT,
-            status TEXT NOT NULL,
-            data_hora TEXT,
-            tecnico TEXT,
-            servico_realizado TEXT,
-            observacoes TEXT,
-            pecas_json TEXT,
-            servicos_json TEXT,
-            hora_inicio TEXT,
-            dirty INTEGER NOT NULL DEFAULT 0,
-            pending_sync INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL
-          )
-        ''');
-        await db.execute('CREATE INDEX idx_ordens_server ON ordens(server_id)');
-        await db.execute('''
-          CREATE TABLE sync_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tipo TEXT NOT NULL,
-            local_uuid TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0
-          )
-        ''');
+        await _createOrdens(db);
+        await _createSyncQueue(db);
+        await _createCatalogo(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -68,9 +38,122 @@ class AppDatabase {
         if (oldVersion < 4) {
           await _ensureColumn(db, 'ordens', 'servico_realizado', 'TEXT');
         }
+        if (oldVersion < 5) {
+          await _createCatalogo(db);
+        }
       },
     );
     return _db!;
+  }
+
+  Future<void> _createOrdens(Database db) async {
+    await db.execute('''
+      CREATE TABLE ordens (
+        local_uuid TEXT PRIMARY KEY,
+        server_id INTEGER,
+        numero TEXT NOT NULL,
+        numero_offline TEXT,
+        cliente TEXT NOT NULL,
+        telefone TEXT,
+        endereco TEXT,
+        equipamento TEXT,
+        problema TEXT,
+        status TEXT NOT NULL,
+        data_hora TEXT,
+        tecnico TEXT,
+        servico_realizado TEXT,
+        observacoes TEXT,
+        pecas_json TEXT,
+        servicos_json TEXT,
+        hora_inicio TEXT,
+        dirty INTEGER NOT NULL DEFAULT 0,
+        pending_sync INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('CREATE INDEX idx_ordens_server ON ordens(server_id)');
+  }
+
+  Future<void> _createSyncQueue(Database db) async {
+    await db.execute('''
+      CREATE TABLE sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tipo TEXT NOT NULL,
+        local_uuid TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+  }
+
+  Future<void> _createCatalogo(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS clientes (
+        id INTEGER PRIMARY KEY,
+        nome TEXT NOT NULL,
+        fantasia TEXT,
+        telefone TEXT,
+        email TEXT,
+        cpf_cnpj TEXT,
+        cep TEXT,
+        endereco TEXT,
+        endereco_completo TEXT,
+        numero TEXT,
+        bairro TEXT,
+        cidade TEXT,
+        uf TEXT
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_clientes_nome ON clientes(nome)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_clientes_doc ON clientes(cpf_cnpj)',
+    );
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS produtos (
+        id INTEGER PRIMARY KEY,
+        codigo TEXT,
+        codigo_barras TEXT,
+        codigo_barras_caixa TEXT,
+        descricao TEXT NOT NULL,
+        unidade TEXT,
+        grupo TEXT,
+        preco REAL NOT NULL DEFAULT 0,
+        estoque REAL NOT NULL DEFAULT 0,
+        estoque_reservado REAL NOT NULL DEFAULT 0,
+        estoque_disponivel REAL NOT NULL DEFAULT 0,
+        foto_url TEXT,
+        is_servico INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_produtos_desc ON produtos(descricao)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_produtos_cod ON produtos(codigo)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_produtos_grupo ON produtos(grupo)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_produtos_servico ON produtos(is_servico)',
+    );
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS grupos (
+        nome TEXT PRIMARY KEY
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sync_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    ''');
   }
 
   /// Evita falha se a coluna já existir (upgrade repetido / schema misto).
@@ -87,6 +170,202 @@ class AppDatabase {
   }
 
   String newLocalUuid() => _uuid.v4();
+
+  Future<bool> catalogoSincronizado() async {
+    final rows = await (await db).query(
+      'sync_meta',
+      where: "key = 'catalog_synced_at'",
+      limit: 1,
+    );
+    return rows.isNotEmpty && '${rows.first['value'] ?? ''}'.isNotEmpty;
+  }
+
+  Future<void> marcarCatalogoSincronizado() async {
+    await (await db).insert(
+      'sync_meta',
+      {'key': 'catalog_synced_at', 'value': DateTime.now().toIso8601String()},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> replaceCatalogo({
+    required List<Map<String, dynamic>> clientes,
+    required List<Map<String, dynamic>> produtos,
+    required List<String> grupos,
+  }) async {
+    final database = await db;
+    await database.transaction((txn) async {
+      await txn.delete('clientes');
+      await txn.delete('produtos');
+      await txn.delete('grupos');
+
+      final batch = txn.batch();
+      for (final c in clientes) {
+        final id = c['id'];
+        if (id == null) continue;
+        batch.insert('clientes', {
+          'id': id is int ? id : int.tryParse('$id'),
+          'nome': '${c['nome'] ?? ''}',
+          'fantasia': '${c['fantasia'] ?? ''}',
+          'telefone': '${c['telefone'] ?? ''}',
+          'email': '${c['email'] ?? ''}',
+          'cpf_cnpj': '${c['cpf_cnpj'] ?? ''}',
+          'cep': '${c['cep'] ?? ''}',
+          'endereco': '${c['endereco'] ?? ''}',
+          'endereco_completo': '${c['endereco_completo'] ?? c['endereco'] ?? ''}',
+          'numero': '${c['numero'] ?? ''}',
+          'bairro': '${c['bairro'] ?? ''}',
+          'cidade': '${c['cidade'] ?? ''}',
+          'uf': '${c['uf'] ?? ''}',
+        });
+      }
+      for (final p in produtos) {
+        final id = p['id'];
+        if (id == null) continue;
+        final estoque = _toDouble(p['estoque']);
+        final reservado = _toDouble(p['estoque_reservado']);
+        final disponivel = p.containsKey('estoque_disponivel') && p['estoque_disponivel'] != null
+            ? _toDouble(p['estoque_disponivel'])
+            : estoque - reservado;
+        batch.insert('produtos', {
+          'id': id is int ? id : int.tryParse('$id'),
+          'codigo': '${p['codigo'] ?? ''}',
+          'codigo_barras': '${p['codigo_barras'] ?? ''}',
+          'codigo_barras_caixa': '${p['codigo_barras_caixa'] ?? ''}',
+          'descricao': '${p['descricao'] ?? ''}',
+          'unidade': '${p['unidade'] ?? 'UN'}',
+          'grupo': '${p['grupo'] ?? ''}'.trim(),
+          'preco': _toDouble(p['preco']),
+          'estoque': estoque,
+          'estoque_reservado': reservado,
+          'estoque_disponivel': disponivel,
+          'foto_url': '${p['foto_url'] ?? ''}'.trim(),
+          'is_servico': (p['is_servico'] == true || p['is_servico'] == 1) ? 1 : 0,
+        });
+      }
+      for (final g in grupos) {
+        final nome = g.trim();
+        if (nome.isEmpty) continue;
+        batch.insert('grupos', {'nome': nome});
+      }
+      await batch.commit(noResult: true);
+    });
+    await marcarCatalogoSincronizado();
+  }
+
+  double _toDouble(dynamic v) {
+    if (v is num) return v.toDouble();
+    return double.tryParse('${v ?? 0}') ?? 0;
+  }
+
+  Future<List<ClienteResumo>> buscarClientesLocal(String termo, {int limit = 40}) async {
+    final q = termo.trim();
+    final database = await db;
+    List<Map<String, Object?>> rows;
+    if (q.isEmpty) {
+      rows = await database.query('clientes', orderBy: 'nome COLLATE NOCASE', limit: limit);
+    } else {
+      final like = '%$q%';
+      final digits = q.replaceAll(RegExp(r'\D'), '');
+      rows = await database.query(
+        'clientes',
+        where: digits.length >= 2
+            ? '(nome LIKE ? OR fantasia LIKE ? OR telefone LIKE ? OR cpf_cnpj LIKE ? OR REPLACE(REPLACE(REPLACE(REPLACE(cpf_cnpj, ".", ""), "-", ""), "/", ""), " ", "") LIKE ?)'
+            : '(nome LIKE ? OR fantasia LIKE ? OR telefone LIKE ? OR cpf_cnpj LIKE ?)',
+        whereArgs: digits.length >= 2
+            ? [like, like, like, like, '%$digits%']
+            : [like, like, like, like],
+        orderBy: 'nome COLLATE NOCASE',
+        limit: limit,
+      );
+    }
+    return rows.map(_clienteFromRow).toList();
+  }
+
+  ClienteResumo _clienteFromRow(Map<String, Object?> row) {
+    return ClienteResumo(
+      id: row['id'] is int ? row['id'] as int : int.parse('${row['id']}'),
+      nome: '${row['nome'] ?? ''}',
+      telefone: '${row['telefone'] ?? ''}',
+      email: '${row['email'] ?? ''}',
+      cpfCnpj: '${row['cpf_cnpj'] ?? ''}',
+      cep: '${row['cep'] ?? ''}',
+      endereco: '${row['endereco'] ?? ''}',
+      enderecoCompleto: '${row['endereco_completo'] ?? row['endereco'] ?? ''}',
+      numero: '${row['numero'] ?? ''}',
+      bairro: '${row['bairro'] ?? ''}',
+      cidade: '${row['cidade'] ?? ''}',
+      uf: '${row['uf'] ?? ''}',
+    );
+  }
+
+  Future<List<String>> listarGruposLocal() async {
+    final rows = await (await db).query('grupos', orderBy: 'nome COLLATE NOCASE');
+    return rows
+        .map((r) => '${r['nome'] ?? ''}'.trim())
+        .where((n) => n.isNotEmpty)
+        .toList();
+  }
+
+  Future<List<ProdutoResumo>> buscarProdutosLocal(
+    String termo, {
+    String tipo = 'produto',
+    String? grupo,
+    int limit = 100,
+  }) async {
+    final q = termo.trim();
+    final g = (grupo ?? '').trim();
+    final where = StringBuffer();
+    final args = <Object?>[];
+
+    if (tipo == 'servico') {
+      where.write('is_servico = 1');
+    } else if (tipo != 'todos') {
+      where.write('(is_servico = 0 OR is_servico IS NULL)');
+    } else {
+      where.write('1=1');
+    }
+
+    if (g.isNotEmpty) {
+      where.write(' AND grupo = ?');
+      args.add(g);
+    }
+
+    if (q.isNotEmpty) {
+      final like = '%$q%';
+      where.write(
+        ' AND (descricao LIKE ? OR codigo LIKE ? OR codigo_barras LIKE ? OR codigo_barras_caixa LIKE ?)',
+      );
+      args.addAll([like, like, like, like]);
+    }
+
+    final rows = await (await db).query(
+      'produtos',
+      where: where.toString(),
+      whereArgs: args,
+      orderBy: 'descricao COLLATE NOCASE',
+      limit: limit,
+    );
+    return rows.map(_produtoFromRow).toList();
+  }
+
+  ProdutoResumo _produtoFromRow(Map<String, Object?> row) {
+    return ProdutoResumo(
+      id: row['id'] is int ? row['id'] as int : int.parse('${row['id']}'),
+      descricao: '${row['descricao'] ?? ''}',
+      codigo: '${row['codigo'] ?? ''}',
+      codigoBarras: '${row['codigo_barras'] ?? ''}',
+      codigoBarrasCaixa: '${row['codigo_barras_caixa'] ?? ''}',
+      unidade: '${row['unidade'] ?? 'UN'}',
+      grupo: '${row['grupo'] ?? ''}'.trim(),
+      preco: _toDouble(row['preco']),
+      estoque: _toDouble(row['estoque']),
+      estoqueReservado: _toDouble(row['estoque_reservado']),
+      estoqueDisponivel: _toDouble(row['estoque_disponivel']),
+      fotoUrl: '${row['foto_url'] ?? ''}'.trim(),
+      isServico: (row['is_servico'] as int? ?? 0) == 1,
+    );
+  }
 
   Future<List<OrdemServico>> listOrdens() async {
     final rows = await (await db).query('ordens', orderBy: 'updated_at DESC');

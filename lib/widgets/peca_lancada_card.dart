@@ -28,6 +28,11 @@ class PecaLancadaCard extends StatelessWidget {
       if (peca.imei.isNotEmpty) 'IMEI: ${peca.imei}',
     ].join(' · ');
 
+    final temDesconto = peca.desconto > 0.009;
+    final valores = temDesconto
+        ? 'Qtd: $qtd · Unitário: $unitario · Desc.: R\$ ${peca.desconto.toStringAsFixed(2).replaceAll('.', ',')} · Total: $total'
+        : 'Qtd: $qtd · Unitário: $unitario · Total: $total';
+
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
       decoration: BoxDecoration(
@@ -77,7 +82,7 @@ class PecaLancadaCard extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(right: 8, bottom: 2),
             child: Text(
-              'Qtd: $qtd · Unitário: $unitario · Total: $total',
+              valores,
               style: const TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.w700,
